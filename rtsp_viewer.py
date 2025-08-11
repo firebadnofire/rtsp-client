@@ -2,12 +2,23 @@ import sys, time, threading
 from typing import Optional
 import numpy as np
 import av  # PyAV
+
+# Robust exception import across PyAV versions
+try:
+    from av.error import FFError as AvError
+except Exception:
+    try:
+        from av.error import Error as AvError
+    except Exception:
+        AvError = Exception  # last-resort fallback
+
 from PyQt6.QtCore import Qt, pyqtSignal, QObject
 from PyQt6.QtGui import QImage, QPixmap
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
     QComboBox, QSpinBox, QFileDialog, QMessageBox
 )
+
 
 class VideoWorker(QObject):
     frame_ready = pyqtSignal(QImage)
@@ -40,12 +51,11 @@ class VideoWorker(QObject):
         return self._last_qimage.save(path)
 
     def _run(self, url: str, transport: str, latency_ms: int):
-        # Map to FFmpeg options
-        # stimeout is microseconds; max_delay in microseconds as well
+        # FFmpeg/RTSP options
         opts = {
-            "rtsp_transport": transport,          # "tcp" or "udp"
-            "stimeout": str(5_000_000),           # 5s connect/read timeout
-            "max_delay": str(max(0, latency_ms) * 1000)  # µs
+            "rtsp_transport": transport,           # "tcp" or "udp"
+            "stimeout": str(5_000_000),            # 5s connect/read timeout (µs)
+            "max_delay": str(max(0, latency_ms) * 1000),  # decoder queue (µs)
         }
 
         while not self._stop.is_set():
@@ -56,31 +66,35 @@ class VideoWorker(QObject):
                     if stream is None:
                         self.status.emit("No video stream found")
                         break
-                    # Low-latency tuning
+
+                    # Low-latency decode hints
                     stream.thread_type = "AUTO"
-                    stream.codec_context.skip_frame = "NONKEY"  # drop B/P on lag
-                    stream.codec_context.skip_loop_filter = "NONKEY"
+                    # Skip non-key frames if we're falling behind
+                    try:
+                        stream.codec_context.skip_frame = "NONKEY"
+                    except Exception:
+                        pass  # some codecs/versions may not expose this
 
                     self.status.emit("Playing")
                     for frame in container.decode(stream):
                         if self._stop.is_set():
                             break
-                        # Convert to RGB QImage
                         img = frame.to_ndarray(format="rgb24")
                         h, w, _ = img.shape
                         qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888)
-                        # Make a deep copy so numpy buffer can be GC’d
-                        qimg = qimg.copy()
+                        qimg = qimg.copy()  # detach from numpy buffer
                         self._last_qimage = qimg
                         self.frame_ready.emit(qimg)
+
                 if self._stop.is_set():
                     break
                 self.status.emit("Stream ended, reconnecting in 2s…")
                 time.sleep(2)
-            except av.AVError as e:
+
+            except AvError as e:
                 if self._stop.is_set():
                     break
-                self.status.emit(f"FFmpeg error: {e}; retrying in 2s…")
+                self.status.emit(f"FFmpeg/PyAV error: {e}; retrying in 2s…")
                 time.sleep(2)
             except Exception as e:
                 if self._stop.is_set():
@@ -162,17 +176,21 @@ class RtspApp(QWidget):
         self.status_lbl.setText("Stopped")
 
     def on_frame(self, qimg: QImage):
-        # Scale to fit while keeping aspect ratio
         pix = QPixmap.fromImage(qimg)
-        self.video_lbl.setPixmap(pix.scaled(
-            self.video_lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
-        ))
+        if not pix.isNull():
+            self.video_lbl.setPixmap(pix.scaled(
+                self.video_lbl.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            ))
 
     def resizeEvent(self, event):
-        # Ensure the last frame resizes with the window
-        if self.video_lbl.pixmap():
-            self.video_lbl.setPixmap(self.video_lbl.pixmap().scaled(
-                self.video_lbl.size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation
+        pm = self.video_lbl.pixmap()
+        if pm and not pm.isNull():
+            self.video_lbl.setPixmap(pm.scaled(
+                self.video_lbl.size(),
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
             ))
         super().resizeEvent(event)
 
@@ -180,7 +198,9 @@ class RtspApp(QWidget):
         pass
 
     def snapshot(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", "snapshot.png", "PNG (*.png);;JPEG (*.jpg)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Snapshot", "snapshot.png", "PNG (*.png);;JPEG (*.jpg)"
+        )
         if path:
             ok = self.worker.save_snapshot(path)
             if not ok:
@@ -189,6 +209,7 @@ class RtspApp(QWidget):
     def closeEvent(self, e):
         self.worker.stop()
         super().closeEvent(e)
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
