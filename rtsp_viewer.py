@@ -1,7 +1,13 @@
 import sys, time, threading, json
-from typing import Optional
+from typing import Optional, List, Dict, Any
 import numpy as np
 import av  # PyAV
+
+# ---------------------- Configurable display targets ----------------------
+# Pane size is fixed to keep feeds from "growing" as new frames arrive.
+# 960x540 (16:9) gives a 1920x1080 total canvas for the 2x2 grid — a good fit
+# while still downscaling cleanly from 4K cameras.
+PANE_TARGET_W, PANE_TARGET_H = 960, 540
 
 # Robust exception import across PyAV versions
 try:
@@ -12,14 +18,15 @@ except Exception:
     except Exception:
         AvError = Exception  # last-resort fallback
 
-from PyQt6.QtCore import Qt, pyqtSignal, QObject
-from PyQt6.QtGui import QImage, QPixmap, QCursor
+from PyQt6.QtCore import Qt, pyqtSignal, QObject, QSize, QPoint, QRect
+from PyQt6.QtGui import QImage, QPixmap, QCursor, QFont
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
-    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout
+    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame
 )
 
 
+# ---------------------- Worker ----------------------
 class VideoWorker(QObject):
     frame_ready = pyqtSignal(QImage)
     status = pyqtSignal(str)
@@ -74,6 +81,7 @@ class VideoWorker(QObject):
                     for frame in container.decode(stream):
                         if self._stop.is_set():
                             break
+                        # Convert frame to RGB and keep a copy
                         img = frame.to_ndarray(format="rgb24")
                         h, w, _ = img.shape
                         qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888)
@@ -97,8 +105,79 @@ class VideoWorker(QObject):
         self.stopped.emit()
 
 
+# ---------------------- Video Pane ----------------------
+class VideoPane(QFrame):
+    clicked = pyqtSignal(int)  # emits panel index
+
+    def __init__(self, index: int, title: str = "", target_size: QSize = QSize(PANE_TARGET_W, PANE_TARGET_H)):
+        super().__init__()
+        self.index = index
+        self.setObjectName(f"pane{index}")
+        self.setFrameShape(QFrame.Shape.StyledPanel)
+        self.setStyleSheet("QFrame { background: #111; border: 1px solid #333; }")
+
+        self._last_pix: Optional[QPixmap] = None
+        self._target_size = target_size
+
+        # Title bar
+        self.title = QLabel(title or f"Feed {index+1}")
+        self.title.setStyleSheet("color:#bbb; background: #222; padding:4px 8px;")
+        self.title.setFont(QFont("Monospace", 9))
+
+        # Video label — fixed size to stop growth
+        self.video_lbl = QLabel()
+        self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.video_lbl.setStyleSheet("background:#000; color:#666;")
+        self.video_lbl.setText("No video")
+        self.video_lbl.setFixedSize(self._target_size)
+
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(0)
+        v.addWidget(self.title)
+        # center the fixed-size video label
+        wrap = QHBoxLayout()
+        wrap.addStretch(1)
+        wrap.addWidget(self.video_lbl)
+        wrap.addStretch(1)
+        v.addLayout(wrap, 1)
+
+    def sizeHint(self) -> QSize:
+        # Include title height overhead
+        return QSize(self._target_size.width(), self._target_size.height() + 22)
+
+    def set_active(self, active: bool):
+        if active:
+            self.setStyleSheet("QFrame { background:#111; border: 2px solid #4da3ff; }")
+            self.title.setStyleSheet("color:#e6f1ff; background:#1b2a3a; padding:4px 8px;")
+        else:
+            self.setStyleSheet("QFrame { background:#111; border: 1px solid #333; }")
+            self.title.setStyleSheet("color:#bbb; background:#222; padding:4px 8px;")
+
+    def on_frame(self, qimg: QImage):
+        if qimg.isNull():
+            return
+        # Always scale to the fixed target size to avoid growth
+        pm = QPixmap.fromImage(qimg)
+        if pm.isNull():
+            return
+        scaled = pm.scaled(self._target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self._last_pix = scaled
+        self.video_lbl.setPixmap(scaled)
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.clicked.emit(self.index)
+        super().mousePressEvent(e)
+
+
+# ---------------------- Fullscreen Window ----------------------
 class FullscreenVideo(QWidget):
-    """A borderless fullscreen window that shows only the video feed."""
+    """A borderless fullscreen window that shows only the video feed for the active panel.
+
+    This version uses the *actual display size* and scales every frame to the
+    current window size (typically the full-screen size), instead of a fixed target.
+    """
 
     def __init__(self, parent: Optional[QWidget] = None):
         super().__init__(parent)
@@ -113,36 +192,25 @@ class FullscreenVideo(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
-        lay.addWidget(self.video_lbl, 1)
+        lay.addWidget(self.video_lbl)
 
-        self._last_pix: Optional[QPixmap] = None
         self._cursor_hidden = False
 
+    def _target_size(self) -> QSize:
+        # Use the actual current window size, which is the screen size in fullscreen
+        return self.size()
+
     def on_frame(self, qimg: QImage):
-        if not self.isVisible():
+        if not self.isVisible() or qimg.isNull():
             return
-        pix = QPixmap.fromImage(qimg)
-        if pix.isNull():
+        pm = QPixmap.fromImage(qimg)
+        if pm.isNull():
             return
-        self._last_pix = pix
-        self._rescale()
-
-    def _rescale(self):
-        pm = self._last_pix
-        if pm is None or pm.isNull():
-            return
-        self.video_lbl.setPixmap(pm.scaled(
-            self.video_lbl.size(),
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
-        ))
-
-    def resizeEvent(self, e):
-        self._rescale()
-        super().resizeEvent(e)
+        # Scale to *current* window size, preserving aspect ratio
+        scaled = pm.scaled(self._target_size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        self.video_lbl.setPixmap(scaled)
 
     def keyPressEvent(self, e):
-        # Exit on Esc or F11
         if e.key() in (Qt.Key.Key_Escape, Qt.Key.Key_F11, Qt.Key.Key_Q):
             self.hide()
             e.accept()
@@ -150,12 +218,10 @@ class FullscreenVideo(QWidget):
         super().keyPressEvent(e)
 
     def mouseDoubleClickEvent(self, e):
-        # Double-click to exit
         self.hide()
         e.accept()
 
     def showEvent(self, e):
-        # Hide cursor in fullscreen for cleaner view
         if not self._cursor_hidden:
             QApplication.setOverrideCursor(QCursor(Qt.CursorShape.BlankCursor))
             self._cursor_hidden = True
@@ -168,12 +234,36 @@ class FullscreenVideo(QWidget):
         super().hideEvent(e)
 
 
+# ---------------------- Main App ----------------------
 class RtspApp(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("RTSP Viewer (PyQt6 + PyAV)")
-        self.resize(1100, 750)
+        self.setWindowTitle("RTSP Viewer — 4 Panel (Fixed Res)")
+        # Default window sized to fit 2x2 panes at the fixed target (plus UI)
+        self.resize(PANE_TARGET_W * 2 + 80, PANE_TARGET_H * 2 + 300)
 
+        # Per-panel state (what the UI edits for the *active* panel)
+        self.panel_states: List[Dict[str, Any]] = [
+            {
+                "user": "",
+                "pass": "",
+                "ip": "",
+                "port": 554,
+                "slug": "/cam/realmonitor",
+                "channel": "1",
+                "subtype": "0",
+                "transport": "tcp",
+                "latency": 100,
+                "running": False,
+                "title": f"Feed {i+1}",
+            }
+            for i in range(4)
+        ]
+
+        # Workers
+        self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
+
+        # --- Controls (apply to active panel) ---
         self.user_edit = QLineEdit(self)
         self.user_edit.setPlaceholderText("user")
         self.pass_edit = QLineEdit(self)
@@ -193,7 +283,7 @@ class RtspApp(QWidget):
         self.channel_combo = QComboBox(self)
         self.channel_combo.addItems([str(i) for i in range(1, 17)])
         self.subtype_combo = QComboBox(self)
-        self.subtype_combo.addItems(["0", "1", "2"])
+        self.subtype_combo.addItems(["0", "1", "2"])  # vendor-dependent
 
         self.transport = QComboBox(self)
         self.transport.addItems(["tcp", "udp"])
@@ -211,17 +301,50 @@ class RtspApp(QWidget):
         self.stop_btn.setEnabled(False)
         self.snap_btn = QPushButton("Snapshot")
         self.snap_btn.setEnabled(False)
-        self.fullscreen_btn = QPushButton("Fullscreen")
+        self.fullscreen_btn = QPushButton("Fullscreen (active)")
         self.save_btn = QPushButton("Save Config…")
         self.load_btn = QPushButton("Load Config…")
 
-        self.status_lbl = QLabel("Idle")
-        self.video_lbl = QLabel()
-        self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_lbl.setText("No video")
-        self.video_lbl.setStyleSheet("background:#111; color:#888;")
+        # New: Start/Stop all cameras
+        self.start_all_btn = QPushButton("Start All")
+        self.stop_all_btn = QPushButton("Stop All")
 
+        self.status_lbl = QLabel("Idle")
+
+        # 2x2 grid of panes
+        self.panes: List[VideoPane] = [VideoPane(i) for i in range(4)]
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        grid.addWidget(self.panes[0], 0, 0)
+        grid.addWidget(self.panes[1], 0, 1)
+        grid.addWidget(self.panes[2], 1, 0)
+        grid.addWidget(self.panes[3], 1, 1)
+
+        # Connect workers to panes
+        for i, w in enumerate(self.workers):
+            w.frame_ready.connect(self.panes[i].on_frame)
+            w.status.connect(self._make_status_updater(i))
+
+        # Active panel tracking
+        self.active_index: int = 0
+        for p in self.panes:
+            p.clicked.connect(self.set_active_panel)
+        self._update_active_styles()
+
+        # Feed UI changes to preview
+        for w in [
+            self.user_edit, self.pass_edit, self.host_edit, self.port_spin,
+            self.path_edit, self.channel_combo, self.subtype_combo, self.transport, self.latency
+        ]:
+            if isinstance(w, QComboBox):
+                w.currentIndexChanged.connect(self.update_preview)
+            else:
+                getattr(w, 'textChanged', None) and w.textChanged.connect(self.update_preview)
+                getattr(w, 'valueChanged', None) and w.valueChanged.connect(self.update_preview)
+
+        # Top form
         form = QFormLayout()
+        form.addRow("Active panel", QLabel("Click a feed to select (blue border)"))
         form.addRow("User", self.user_edit)
         form.addRow("Pass", self.pass_edit)
         form.addRow("IP / Host", self.host_edit)
@@ -243,6 +366,9 @@ class RtspApp(QWidget):
         row2.addWidget(self.stop_btn)
         row2.addWidget(self.snap_btn)
         row2.addWidget(self.fullscreen_btn)
+        # New: all-cam controls
+        row2.addWidget(self.start_all_btn)
+        row2.addWidget(self.stop_all_btn)
 
         row3 = QHBoxLayout()
         row3.addWidget(QLabel("RTSP URL Preview"))
@@ -250,130 +376,243 @@ class RtspApp(QWidget):
         row3.addWidget(self.save_btn)
         row3.addWidget(self.load_btn)
 
+        # Main vertical layout
         layout = QVBoxLayout(self)
         layout.addLayout(form)
         layout.addLayout(row2)
         layout.addLayout(row3)
         layout.addWidget(self.url_preview)
-        layout.addWidget(self.video_lbl, 1)
+        layout.addLayout(grid, 1)
         layout.addWidget(self.status_lbl)
 
-        # ----- Fullscreen window (separate, video-only) -----
+        # Fullscreen window
         self.fullwin = FullscreenVideo()
+        self._fullscreen_source_index: Optional[int] = None
 
-        self.worker = VideoWorker()
-        self.worker.frame_ready.connect(self.on_frame)
-        self.worker.frame_ready.connect(self.fullwin.on_frame)  # feed fullscreen window too
-        self.worker.status.connect(self.status_lbl.setText)
-        self.worker.stopped.connect(self.on_stopped)
-
+        # Wire control buttons
         self.start_btn.clicked.connect(self.start_stream)
         self.stop_btn.clicked.connect(self.stop_stream)
         self.snap_btn.clicked.connect(self.snapshot)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.save_btn.clicked.connect(self.save_config)
         self.load_btn.clicked.connect(self.load_config)
+        # New: all-cam controls
+        self.start_all_btn.clicked.connect(self.start_all_streams)
+        self.stop_all_btn.clicked.connect(self.stop_all_streams)
 
-        for w in [
-            self.user_edit, self.pass_edit, self.host_edit, self.port_spin,
-            self.path_edit, self.channel_combo, self.subtype_combo
-        ]:
-            if isinstance(w, QComboBox):
-                w.currentIndexChanged.connect(self.update_preview)
-            else:
-                w.textChanged.connect(self.update_preview) if isinstance(w, QLineEdit) else w.valueChanged.connect(self.update_preview)
+        # Initialize UI from active panel state
+        self._sync_ui_from_state(self.active_index)
         self.update_preview()
 
-    def build_url(self, include_password: bool = True) -> str:
-        user = self.user_edit.text().strip()
-        pwd = self.pass_edit.text().strip()
-        host = self.host_edit.text().strip()
-        port = int(self.port_spin.value())
-        path = self.path_edit.text().strip() or "/cam/realmonitor"
+    # ---------------- State / URL helpers ----------------
+    def build_url_from_state(self, st: Dict[str, Any], include_password: bool = True) -> str:
+        user = (st.get("user") or "").strip()
+        pwd = (st.get("pass") or "").strip()
+        host = (st.get("ip") or "").strip()
+        port = int(st.get("port") or 554)
+        path = (st.get("slug") or "/cam/realmonitor").strip()
         if not path.startswith("/"):
             path = "/" + path
-        channel = self.channel_combo.currentText()
-        subtype = self.subtype_combo.currentText()
+        channel = st.get("channel", "1")
+        subtype = st.get("subtype", "0")
         auth = ""
         if user:
             auth = user
             if include_password and pwd:
                 auth += f":{pwd}"
             auth += "@"
-        url = f"rtsp://{auth}{host}:{port}{path}?channel={channel}&subtype={subtype}"
-        return url
+        return f"rtsp://{auth}{host}:{port}{path}?channel={channel}&subtype={subtype}"
+
+    def _sync_ui_from_state(self, idx: int):
+        st = self.panel_states[idx]
+        self.user_edit.setText(st.get("user", ""))
+        self.pass_edit.setText(st.get("pass", ""))
+        self.host_edit.setText(st.get("ip", ""))
+        self.port_spin.setValue(int(st.get("port", 554)))
+        self.path_edit.setText(st.get("slug", "/cam/realmonitor"))
+        self._set_combo_value(self.channel_combo, st.get("channel", "1"))
+        self._set_combo_value(self.subtype_combo, st.get("subtype", "0"))
+        self._set_combo_value(self.transport, st.get("transport", "tcp"))
+        self.latency.setValue(int(st.get("latency", 100)))
+        self.update_preview()
+        self._update_buttons_enabled()
+
+    def _sync_state_from_ui(self, idx: int):
+        st = self.panel_states[idx]
+        st["user"] = self.user_edit.text().strip()
+        st["pass"] = self.pass_edit.text().strip()
+        st["ip"] = self.host_edit.text().strip()
+        st["port"] = int(self.port_spin.value())
+        st["slug"] = self.path_edit.text().strip() or "/cam/realmonitor"
+        st["channel"] = self.channel_combo.currentText()
+        st["subtype"] = self.subtype_combo.currentText()
+        st["transport"] = self.transport.currentText()
+        st["latency"] = int(self.latency.value())
+
+    def _set_combo_value(self, combo: QComboBox, val: str):
+        i = combo.findText(val)
+        combo.setCurrentIndex(max(0, i))
 
     def update_preview(self):
-        preview = self.build_url(include_password=False)
-        self.url_preview.setText(preview)
+        st = self.panel_states[self.active_index].copy()
+        st["user"] = self.user_edit.text().strip()
+        st["pass"] = self.pass_edit.text().strip()
+        st["ip"] = self.host_edit.text().strip()
+        st["port"] = int(self.port_spin.value())
+        st["slug"] = self.path_edit.text().strip() or "/cam/realmonitor"
+        st["channel"] = self.channel_combo.currentText()
+        st["subtype"] = self.subtype_combo.currentText()
+        url = self.build_url_from_state(st, include_password=False)
+        self.url_preview.setText(url)
 
+    # ---------------- Active panel handling ----------------
+    def set_active_panel(self, idx: int):
+        if idx == self.active_index:
+            return
+        self._sync_state_from_ui(self.active_index)
+        self.active_index = idx
+        self._update_active_styles()
+        self._sync_ui_from_state(idx)
+        if self.fullwin.isVisible():
+            self._connect_fullscreen_to(idx)
+
+    def _update_active_styles(self):
+        for i, p in enumerate(self.panes):
+            p.set_active(i == self.active_index)
+
+    # ---------------- Start/Stop/Snapshot ----------------
     def start_stream(self):
-        if not self.host_edit.text().strip():
+        self._sync_state_from_ui(self.active_index)
+        st = self.panel_states[self.active_index]
+
+        if not st.get("ip"):
             QMessageBox.warning(self, "Missing host", "Enter the camera IP or hostname.")
             return
-        if not self.path_edit.text().strip():
+        if not st.get("slug"):
             QMessageBox.warning(self, "Missing path", "Enter the base path (e.g., /cam/realmonitor).")
             return
-        url = self.build_url(include_password=True)
-        self.worker.start(url, self.transport.currentText(), self.latency.value())
-        self.start_btn.setEnabled(False)
-        self.stop_btn.setEnabled(True)
-        self.snap_btn.setEnabled(True)
-        self.status_lbl.setText("Starting…")
+
+        url = self.build_url_from_state(st, include_password=True)
+        w = self.workers[self.active_index]
+        w.start(url, st.get("transport", "tcp"), int(st.get("latency", 100)))
+        st["running"] = True
+        self.status_lbl.setText(f"Panel {self.active_index+1}: Starting…")
+        self._update_buttons_enabled()
 
     def stop_stream(self):
-        self.worker.stop()
-        self.start_btn.setEnabled(True)
-        self.stop_btn.setEnabled(False)
-        self.snap_btn.setEnabled(False)
-        self.status_lbl.setText("Stopped")
+        w = self.workers[self.active_index]
+        w.stop()
+        self.panel_states[self.active_index]["running"] = False
+        self.status_lbl.setText(f"Panel {self.active_index+1}: Stopped")
+        self._update_buttons_enabled()
 
-    def on_frame(self, qimg: QImage):
-        pix = QPixmap.fromImage(qimg)
-        if not pix.isNull():
-            self.video_lbl.setPixmap(pix.scaled(
-                self.video_lbl.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
+    def snapshot(self):
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save Snapshot", f"panel{self.active_index+1}_snapshot.png", "PNG (*.png);;JPEG (*.jpg)"
+        )
+        if path:
+            ok = self.workers[self.active_index].save_snapshot(path)
+            if not ok:
+                QMessageBox.warning(self, "Snapshot", "No frame available yet.")
 
-    def resizeEvent(self, event):
-        pm = self.video_lbl.pixmap()
-        if pm and not pm.isNull():
-            self.video_lbl.setPixmap(pm.scaled(
-                self.video_lbl.size(),
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            ))
-        super().resizeEvent(event)
+    def _update_buttons_enabled(self):
+        running = self.panel_states[self.active_index].get("running", False)
+        self.start_btn.setEnabled(not running)
+        self.stop_btn.setEnabled(running)
+        self.snap_btn.setEnabled(True)
+    # ---------------- All-cam controls ----------------
+    def start_all_streams(self):
+        """Start all panels that have enough info configured."""
+        # Ensure the active panel's latest UI values are captured
+        self._sync_state_from_ui(self.active_index)
+        started, skipped = [], []
+        for i in range(4):
+            st = self.panel_states[i]
+            if not st.get("ip") or not st.get("slug"):
+                skipped.append(i + 1)
+                continue
+            try:
+                url = self.build_url_from_state(st, include_password=True)
+                self.workers[i].start(url, st.get("transport", "tcp"), int(st.get("latency", 100)))
+                st["running"] = True
+                started.append(i + 1)
+            except Exception:
+                skipped.append(i + 1)
+        self._update_buttons_enabled()
+        if started and skipped:
+            self.status_lbl.setText(f"All: started {started}; skipped {skipped}")
+        elif started:
+            self.status_lbl.setText(f"All: started {started}")
+        elif skipped:
+            self.status_lbl.setText(f"All: skipped {skipped} (missing host/path)")
+        else:
+            self.status_lbl.setText("All: nothing to start")
 
+    def stop_all_streams(self):
+        for i, w in enumerate(self.workers):
+            try:
+                w.stop()
+            finally:
+                self.panel_states[i]["running"] = False
+        self._update_buttons_enabled()
+        self.status_lbl.setText("All: stopped")
+
+    # ---------------- Fullscreen ----------------
     def toggle_fullscreen(self):
-        # Show/hide separate fullscreen, video-only window
         if self.fullwin.isVisible():
             self.fullwin.hide()
         else:
+            self._connect_fullscreen_to(self.active_index)
+            # Show *true* fullscreen; scaling happens to the window's actual size
             self.fullwin.showFullScreen()
 
-    # ---- Config save/load ----
+    def _connect_fullscreen_to(self, idx: int):
+        if hasattr(self, "_fullscreen_source_index") and self._fullscreen_source_index is not None:
+            try:
+                self.workers[self._fullscreen_source_index].frame_ready.disconnect(self.fullwin.on_frame)
+            except Exception:
+                pass
+        self.workers[idx].frame_ready.connect(self.fullwin.on_frame)
+        self._fullscreen_source_index = idx
+
+    # ---------------- Save/Load ----------------
+    def _window_geometry(self) -> Dict[str, int]:
+        g: QRect = self.geometry()
+        return {"x": g.x(), "y": g.y(), "w": g.width(), "h": g.height()}
+
+    def _apply_window_geometry(self, geom: Dict[str, int]):
+        try:
+            x, y, w, h = geom["x"], geom["y"], geom["w"], geom["h"]
+            self.setGeometry(QRect(x, y, w, h))
+        except Exception:
+            pass
+
     def save_config(self):
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Save Camera Config",
-            "camera.json",
+            "Save 4-Panel Config",
+            "cameras.json",
             "JSON (*.json)"
         )
         if not path:
             return
-        cfg = {
-            "user": self.user_edit.text(),
-            "pass": self.pass_edit.text(),
-            "ip": self.host_edit.text(),
-            "port": int(self.port_spin.value()),
-            "slug": self.path_edit.text().strip() or "/cam/realmonitor",
+
+        # Always sync the *active* panel from UI; other panels already hold their own latest states
+        self._sync_state_from_ui(self.active_index)
+
+        data = {
+            "version": 1,
+            "ui": {
+                "active_index": self.active_index,
+                "window": self._window_geometry(),
+                "fullscreen_visible": self.fullwin.isVisible(),
+            },
+            # Save *all* four panel configs, not just the active one
+            "panels": self.panel_states,
         }
         try:
             with open(path, "w", encoding="utf-8") as f:
-                json.dump(cfg, f, indent=2)
+                json.dump(data, f, indent=2)
             self.status_lbl.setText(f"Saved config → {path}")
         except Exception as e:
             QMessageBox.critical(self, "Save failed", str(e))
@@ -381,7 +620,7 @@ class RtspApp(QWidget):
     def load_config(self):
         path, _ = QFileDialog.getOpenFileName(
             self,
-            "Load Camera Config",
+            "Load 4-Panel Config",
             "",
             "JSON (*.json)"
         )
@@ -389,41 +628,61 @@ class RtspApp(QWidget):
             return
         try:
             with open(path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
+                data = json.load(f)
         except Exception as e:
             QMessageBox.critical(self, "Load failed", str(e))
             return
 
-        # Set fields if present
-        self.user_edit.setText(str(cfg.get("user", "")))
-        self.pass_edit.setText(str(cfg.get("pass", "")))
-        self.host_edit.setText(str(cfg.get("ip", "")))
-        if "port" in cfg:
-            try:
-                self.port_spin.setValue(int(cfg["port"]))
-            except Exception:
-                pass
-        slug = str(cfg.get("slug", "/cam/realmonitor"))
-        self.path_edit.setText(slug)
+        panels = data.get("panels")
+        if not isinstance(panels, list) or len(panels) != 4:
+            QMessageBox.critical(self, "Load failed", "Config must contain a 'panels' list of length 4.")
+            return
 
-        self.update_preview()
-        self.status_lbl.setText(f"Loaded config ← {path}")
+        # Stop current workers before applying new states
+        for i in range(4):
+            self.workers[i].stop()
 
-    def on_stopped(self):
-        pass
+        self.panel_states = panels
 
-    def snapshot(self):
-        path, _ = QFileDialog.getSaveFileName(
-            self, "Save Snapshot", "snapshot.png", "PNG (*.png);;JPEG (*.jpg)"
-        )
-        if path:
-            ok = self.worker.save_snapshot(path)
-            if not ok:
-                QMessageBox.warning(self, "Snapshot", "No frame available yet.")
+        # Apply UI meta (active panel, window geometry)
+        ui_meta = data.get("ui", {})
+        if isinstance(ui_meta, dict):
+            geom = ui_meta.get("window")
+            if isinstance(geom, dict):
+                self._apply_window_geometry(geom)
+            new_active = ui_meta.get("active_index")
+            if isinstance(new_active, int) and 0 <= new_active < 4:
+                self.active_index = new_active
 
+        # Refresh panes and active UI
+        self._update_active_styles()
+        self._sync_ui_from_state(self.active_index)
+
+        # Optionally (re)start any panels that were saved with running=True
+        restarted = []
+        for i, st in enumerate(self.panel_states):
+            if st.get("running"):
+                url = self.build_url_from_state(st, include_password=True)
+                self.workers[i].start(url, st.get("transport", "tcp"), int(st.get("latency", 100)))
+                restarted.append(i + 1)
+        if restarted:
+            self.status_lbl.setText(f"Loaded config ← {path} (auto-started: {restarted})")
+        else:
+            self.status_lbl.setText(f"Loaded config ← {path}")
+
+    # ---------------- Close ----------------
     def closeEvent(self, e):
-        self.worker.stop()
+        for w in self.workers:
+            w.stop()
         super().closeEvent(e)
+
+    # ---------------- Helpers ----------------
+    def _make_status_updater(self, idx: int):
+        def _set(text: str):
+            prefix = f"P{idx+1}: "
+            if idx == self.active_index:
+                self.status_lbl.setText(prefix + text)
+        return _set
 
 
 if __name__ == "__main__":
