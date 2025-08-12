@@ -27,3 +27,5 @@ go.work.sum
 
 rtsp-url.txt
 config.json
+venv/
+venv/*
