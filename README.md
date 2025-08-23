@@ -57,7 +57,7 @@ pip install -r requirements.txt
 Run the viewer:
 
 ```bash
-python3 rtsp_viewer.py
+venv/bin/python rtsp_viewer.py
 ```
 
 You’ll see a **2×2 camera panel grid**.

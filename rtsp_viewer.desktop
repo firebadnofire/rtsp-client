@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=RTSP Viewer
+Comment=Launch the RTSP stream viewer
+Exec=RTSPPATH/venv/bin/python RTSPPATH/rtsp_viewer.py
+Path=RTSPPATH
+Terminal=false
+Categories=Utility;Network;
