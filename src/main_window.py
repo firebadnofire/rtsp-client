@@ -3,7 +3,6 @@
 import json
 from typing import Optional, List, Dict, Any
 
-from PyQt6.QtCore import QRect
 from PyQt6.QtWidgets import (
     QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
     QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout
@@ -18,7 +17,6 @@ from widgets import VideoPane, FullscreenVideo
 class RtspApp(QWidget):
     def __init__(self):
         super().__init__()
-        # --- MODIFIED: Adjusted window title and initial size for the new layout ---
         self.setWindowTitle("RTSP Viewer")
         self.resize(PANE_TARGET_W * 2 + 420, PANE_TARGET_H * 2 + 40)
 
@@ -31,14 +29,15 @@ class RtspApp(QWidget):
                 "running": False, "title": f"Feed {i + 1}",
             } for i in range(4)
         ]
-
-        # Video decoding workers
         self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
-
-        # --- UI Initialization ---
+        self.active_index: int = 0
+        
+        # UI Initialization
         self._init_ui()
+        # Apply the modern, centralized stylesheet
+        self._apply_modern_stylesheet()
 
-        # Connect workers to panes for video frames and status updates
+        # Connect workers to panes
         for i, worker in enumerate(self.workers):
             worker.frame_ready.connect(self.panes[i].on_frame)
             worker.status.connect(self._make_status_updater(i))
@@ -46,15 +45,136 @@ class RtspApp(QWidget):
         # Fullscreen window (initially hidden)
         self.fullwin = FullscreenVideo()
         self._fullscreen_source_index: Optional[int] = None
-
-        # --- MODIFIED ---
-        # Explicitly initialize the UI for the first panel.
-        # This makes the startup sequence clear and removes special-case logic
-        # from the set_active_panel method, resolving inconsistent state handling.
-        self.active_index: int = 0
+        
+        # Explicitly initialize the UI for the first panel
         self._sync_ui_from_state()
         self._update_active_styles()
 
+    def _apply_modern_stylesheet(self):
+        """Defines and applies the Material/Fluent inspired application stylesheet."""
+        stylesheet = """
+            /* GENERAL */
+            RtspApp, FullscreenVideo {
+                background-color: #202124; /* Very dark grey background */
+            }
+            QLabel {
+                color: #e8eaed; /* Light grey text */
+            }
+
+            /* CONTROLS WIDGET (LEFT PANE) */
+            QWidget#controls_widget {
+                background-color: #2d2e30;
+                border-radius: 8px;
+            }
+            QWidget#controls_widget QLabel {
+                font-size: 10pt;
+            }
+            QWidget#controls_widget QLabel b {
+                font-size: 12pt;
+            }
+
+            /* INPUT WIDGETS */
+            QLineEdit, QSpinBox, QComboBox {
+                background-color: #3c3d3f;
+                color: #e8eaed;
+                border: 1px solid #5f6368;
+                border-radius: 4px;
+                padding: 8px;
+                font-size: 10pt;
+            }
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border: 1px solid #8ab4f8; /* Google blue for focus */
+            }
+            QLineEdit[readOnly="true"] {
+                background-color: #202124;
+                color: #9aa0a6;
+            }
+            QSpinBox::up-button, QSpinBox::down-button {
+                width: 18px;
+            }
+            
+            /* --- FIX FOR COMBOBOX DROPDOWN --- */
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox QAbstractItemView {
+                background-color: #3c3d3f; /* Dark background for the list */
+                color: #e8eaed; /* Light text for items */
+                selection-background-color: #8ab4f8; /* Blue for selected item */
+                selection-color: #202124; /* Dark text for selected item */
+                border: 1px solid #5f6368;
+                border-radius: 4px;
+                outline: 0px; /* Remove focus outline */
+            }
+            /* --- END FIX --- */
+
+            /* BUTTONS */
+            QPushButton {
+                background-color: #5f6368;
+                color: #e8eaed;
+                border: none;
+                border-radius: 4px;
+                padding: 10px 16px;
+                font-size: 10pt;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #70757a;
+            }
+            QPushButton:pressed {
+                background-color: #505357;
+            }
+            QPushButton:disabled {
+                background-color: #3c3d3f;
+                color: #70757a;
+            }
+
+            /* PRIMARY ACTION BUTTONS */
+            QPushButton#start_btn, QPushButton#start_all_btn {
+                background-color: #8ab4f8;
+                color: #202124;
+            }
+            QPushButton#start_btn:hover, QPushButton#start_all_btn:hover {
+                background-color: #a1c3fb;
+            }
+            
+            /* DESTRUCTIVE ACTION BUTTONS */
+            QPushButton#stop_btn:hover, QPushButton#stop_all_btn:hover {
+                background-color: #f28b82; /* Google red for stop hover */
+                color: #202124;
+            }
+
+            /* VIDEO PANE STYLING */
+            VideoPane {
+                background-color: #2d2e30;
+                border: 2px solid #3c3d3f;
+                border-radius: 8px;
+            }
+            VideoPane[active="true"] {
+                border: 2px solid #8ab4f8;
+            }
+            
+            QLabel#pane_title {
+                font-size: 9pt;
+                font-weight: bold;
+                color: #bdc1c6;
+                padding: 6px 10px;
+                background-color: transparent;
+            }
+            
+            VideoPane[active="true"] QLabel#pane_title {
+                color: #202124;
+                background-color: #8ab4f8;
+                border-top-left-radius: 6px; /* Match parent radius */
+                border-top-right-radius: 6px;
+            }
+            
+            QLabel#video_lbl {
+                background-color: #000000;
+                color: #5f6368;
+            }
+        """
+        self.setStyleSheet(stylesheet)
 
     def _init_ui(self):
         # --- Controls (apply to the currently active panel) ---
@@ -80,11 +200,15 @@ class RtspApp(QWidget):
 
         # --- Action Buttons ---
         self.start_btn = QPushButton("Start")
+        self.start_btn.setObjectName("start_btn")
         self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setObjectName("stop_btn")
         self.snapshot_btn = QPushButton("Snapshot")
         self.fullscreen_btn = QPushButton("Fullscreen")
         self.start_all_btn = QPushButton("Start All")
+        self.start_all_btn.setObjectName("start_all_btn")
         self.stop_all_btn = QPushButton("Stop All")
+        self.stop_all_btn.setObjectName("stop_all_btn")
         self.save_cfg_btn = QPushButton("Save Config")
         self.load_cfg_btn = QPushButton("Load Config")
 
@@ -96,21 +220,21 @@ class RtspApp(QWidget):
         # --- 2x2 Grid of Video Panes ---
         self.panes: List[VideoPane] = [VideoPane(i) for i in range(4)]
         grid = QGridLayout()
-        grid.setSpacing(4)
+        grid.setSpacing(10)
         grid.addWidget(self.panes[0], 0, 0)
         grid.addWidget(self.panes[1], 0, 1)
         grid.addWidget(self.panes[2], 1, 0)
         grid.addWidget(self.panes[3], 1, 1)
 
-        # --- vvvvvv MODIFIED LAYOUT SECTION vvvvvv ---
-
-        # Left side: A container widget for all controls
+        # --- Layout Section ---
         controls_widget = QWidget()
+        controls_widget.setObjectName("controls_widget")
         controls_layout = QVBoxLayout(controls_widget)
+        controls_layout.setSpacing(12)
         controls_widget.setFixedWidth(400)
         
-        # Form for camera details
         form = QFormLayout()
+        form.setSpacing(10)
         form.addRow("Title:", self.title_edit)
         form.addRow("Username:", self.user_edit)
         form.addRow("Password:", self.pass_edit)
@@ -123,57 +247,60 @@ class RtspApp(QWidget):
         form.addRow("Latency:", self.latency_spin)
 
         # Button row for individual stream actions
-        row2 = QHBoxLayout()
-        row2.addWidget(self.start_btn)
-        row2.addWidget(self.stop_btn)
-        row2.addWidget(self.snapshot_btn)
-        row2.addWidget(self.fullscreen_btn)
+        single_stream_actions = QHBoxLayout()
+        single_stream_actions.addWidget(self.start_btn)
+        single_stream_actions.addWidget(self.stop_btn)
+        single_stream_actions.addWidget(self.snapshot_btn)
+        single_stream_actions.addWidget(self.fullscreen_btn)
+        
+        # Row for global stream controls
+        global_stream_actions = QHBoxLayout()
+        global_stream_actions.addWidget(self.start_all_btn)
+        global_stream_actions.addWidget(self.stop_all_btn)
+        global_stream_actions.addStretch(1) # Push buttons to the left
 
-        # Button row for global actions
-        row3 = QHBoxLayout()
-        row3.addWidget(self.start_all_btn)
-        row3.addWidget(self.stop_all_btn)
-        row3.addStretch(1)
-        row3.addWidget(self.save_cfg_btn)
-        row3.addWidget(self.load_cfg_btn)
+        # Row for configuration controls
+        config_actions = QHBoxLayout()
+        config_actions.addWidget(self.save_cfg_btn)
+        config_actions.addWidget(self.load_cfg_btn)
+        config_actions.addStretch(1) # Push buttons to the left
 
         # Assemble the controls in the left-side vertical layout
-        controls_layout.addWidget(QLabel("<b>Active panel</b> (Click a feed to select)"))
+        controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
         controls_layout.addLayout(form)
+        controls_layout.addSpacing(10)
         controls_layout.addWidget(QLabel("RTSP URL Preview:"))
         controls_layout.addWidget(self.url_preview)
-        controls_layout.addLayout(row2)
-        controls_layout.addLayout(row3)
-        controls_layout.addStretch(1) # Pushes controls to the top
-        
-        # Main layout is a horizontal split
-        main_layout = QHBoxLayout()
-        main_layout.addWidget(controls_widget)
-        main_layout.addLayout(grid, 1) # The '1' allows the grid to expand
+        controls_layout.addLayout(single_stream_actions)
+        controls_layout.addSpacing(20) # Add a visual separator
 
-        # Top-level layout to hold the main split view and the status bar
+        # Add a title for the global actions section
+        controls_layout.addWidget(QLabel("<b>Global Actions</b>"))
+        controls_layout.addLayout(global_stream_actions) 
+        controls_layout.addLayout(config_actions)      
+        controls_layout.addStretch(1)
+        
+        main_layout = QHBoxLayout()
+        main_layout.setSpacing(10)
+        main_layout.addWidget(controls_widget)
+        main_layout.addLayout(grid, 1)
+
         top_level_layout = QVBoxLayout(self)
         top_level_layout.addLayout(main_layout)
         top_level_layout.addWidget(self.status_lbl)
-
-        # --- ^^^^^^ END MODIFIED LAYOUT SECTION ^^^^^^ ---
 
         # --- Connect Signals to Slots ---
         for p in self.panes:
             p.clicked.connect(self.set_active_panel)
 
-        # --- MODIFIED: Split signal connections for auto-restarting ---
-        # These controls only update the URL preview, they do not restart the stream
         for w in (self.title_edit, self.user_edit, self.pass_edit, self.ip_edit, self.slug_edit):
             w.textChanged.connect(self.update_preview)
         for w in (self.port_spin, self.latency_spin):
             w.valueChanged.connect(self.update_preview)
         self.transport_combo.currentIndexChanged.connect(self.update_preview)
 
-        # These controls will trigger a stream restart if the stream is already running
         for w in (self.channel_combo, self.subtype_combo):
             w.currentIndexChanged.connect(self._handle_stream_parameter_change)
-        # --- END MODIFICATION ---
 
         self.start_btn.clicked.connect(self.start_stream)
         self.stop_btn.clicked.connect(self.stop_stream)
@@ -205,16 +332,24 @@ class RtspApp(QWidget):
 
     def _sync_ui_from_state(self):
         st = self.panel_states[self.active_index]
-        self.title_edit.setText(st["title"])
-        self.user_edit.setText(st["user"])
-        self.pass_edit.setText(st["pass"])
-        self.ip_edit.setText(st["ip"])
-        self.port_spin.setValue(st["port"])
-        self.slug_edit.setText(st["slug"])
-        self._set_combo_value(self.channel_combo, st["channel"])
-        self._set_combo_value(self.subtype_combo, st["subtype"])
-        self._set_combo_value(self.transport_combo, st["transport"])
-        self.latency_spin.setValue(st["latency"])
+        self.channel_combo.blockSignals(True)
+        self.subtype_combo.blockSignals(True)
+        self.transport_combo.blockSignals(True)
+        try:
+            self.title_edit.setText(st["title"])
+            self.user_edit.setText(st["user"])
+            self.pass_edit.setText(st["pass"])
+            self.ip_edit.setText(st["ip"])
+            self.port_spin.setValue(st["port"])
+            self.slug_edit.setText(st["slug"])
+            self._set_combo_value(self.channel_combo, st["channel"])
+            self._set_combo_value(self.subtype_combo, st["subtype"])
+            self._set_combo_value(self.transport_combo, st["transport"])
+            self.latency_spin.setValue(st["latency"])
+        finally:
+            self.channel_combo.blockSignals(False)
+            self.subtype_combo.blockSignals(False)
+            self.transport_combo.blockSignals(False)
         self._update_buttons_enabled()
         self.update_preview()
 
@@ -237,50 +372,25 @@ class RtspApp(QWidget):
         combo.setCurrentIndex(idx if idx >= 0 else 0)
 
     def update_preview(self):
-        # Create a temporary state from the UI to generate the preview URL
-        # without saving potentially incomplete data to the main state.
         temp_state = {
-            "user": self.user_edit.text(),
-            "pass": self.pass_edit.text(),
-            "ip": self.ip_edit.text(),
-            "port": self.port_spin.value(),
-            "slug": self.slug_edit.text(),
-            "channel": self.channel_combo.currentText(),
+            "user": self.user_edit.text(), "pass": self.pass_edit.text(),
+            "ip": self.ip_edit.text(), "port": self.port_spin.value(),
+            "slug": self.slug_edit.text(), "channel": self.channel_combo.currentText(),
             "subtype": self.subtype_combo.currentText(),
         }
         url = self.build_url_from_state(temp_state, include_password=False)
         self.url_preview.setText(url)
         self.url_preview.setCursorPosition(0)
 
-    # --- NEW METHOD ---
     def _handle_stream_parameter_change(self, _=None):
-        """
-        Updates the preview and restarts the active stream if it was running.
-        This is connected to controls like channel and subtype dropdowns.
-        """
-        # Always update the preview URL when a parameter changes.
         self.update_preview()
-
-        # Check if the stream for this panel was already running.
         if self.panel_states[self.active_index].get("running", False):
-            # It was running, so stop it...
             self.stop_stream()
-            # ...and start it again. start_stream() will sync from the UI,
-            # picking up the new channel/subtype value.
             self.start_stream()
-    # --- END NEW METHOD ---
 
     def set_active_panel(self, index: int):
-        # --- MODIFIED ---
-        # This logic is simplified to be more consistent. We now assume
-        # self.active_index always exists because it's set in __init__.
-        if not (0 <= index < 4): return
-        if index == self.active_index: return
-
-        # First, save the current UI's state to the previously active panel.
+        if not (0 <= index < 4) or index == self.active_index: return
         self._sync_state_from_ui()
-
-        # Then, update the index and load the new panel's state into the UI.
         self.active_index = index
         self._sync_ui_from_state()
         self._update_active_styles()
@@ -323,6 +433,7 @@ class RtspApp(QWidget):
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.snapshot_btn.setEnabled(running)
+        self.fullscreen_btn.setEnabled(True)
 
     def start_all_streams(self):
         self._sync_state_from_ui()
@@ -374,12 +485,8 @@ class RtspApp(QWidget):
                 if isinstance(loaded_states, list) and len(loaded_states) == 4:
                     self.stop_all_streams()
                     self.panel_states = loaded_states
-                    for i, st in enumerate(self.panel_states):
-                        # Load config but don't auto-start. Let the user start them.
+                    for st in self.panel_states:
                         st['running'] = False
-                    
-                    # After loading, refresh the UI for the active panel (panel 0)
-                    # MODIFIED: Directly sync the UI instead of relying on the panel switch
                     self.active_index = 0
                     self._sync_ui_from_state()
                     self._update_active_styles()
@@ -400,3 +507,4 @@ class RtspApp(QWidget):
             if index == self.active_index:
                 self.status_lbl.setText(f"Panel {index+1}: {msg}")
         return update_status
+

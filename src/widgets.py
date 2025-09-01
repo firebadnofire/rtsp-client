@@ -8,25 +8,26 @@ from PyQt6.QtWidgets import QWidget, QLabel, QHBoxLayout, QVBoxLayout, QFrame, Q
 from config import PANE_TARGET_W, PANE_TARGET_H
 
 class VideoPane(QFrame):
-    clicked = pyqtSignal(int)  # emits panel index
+    clicked = pyqtSignal(int)
 
     def __init__(self, index: int, title: str = "", target_size: QSize = QSize(PANE_TARGET_W, PANE_TARGET_H)):
         super().__init__()
         self.index = index
-        self.setObjectName(f"pane{index}")
+        # --- MODIFIED: Removed object name, will style based on class ---
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setStyleSheet("QFrame { background: #111; border: 1px solid #333; }")
-
+        
+        # --- MODIFIED: Removed inline stylesheet ---
         self._last_pix: Optional[QPixmap] = None
         self._target_size = target_size
 
         self.title = QLabel(title or f"Feed {index+1}")
-        self.title.setStyleSheet("color:#bbb; background: #222; padding:4px 8px;")
-        self.title.setFont(QFont("Monospace", 9))
+        # --- MODIFIED: Added object name for specific styling ---
+        self.title.setObjectName("pane_title")
 
         self.video_lbl = QLabel()
+        # --- MODIFIED: Added object name for specific styling ---
+        self.video_lbl.setObjectName("video_lbl")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_lbl.setStyleSheet("background:#000; color:#666;")
         self.video_lbl.setText("No video")
         self.video_lbl.setFixedSize(self._target_size)
 
@@ -41,23 +42,30 @@ class VideoPane(QFrame):
         v.addLayout(wrap, 1)
 
     def sizeHint(self) -> QSize:
-        return QSize(self._target_size.width(), self._target_size.height() + 22)
+        # Manually calculate hint based on layout to be safe
+        title_h = self.title.sizeHint().height()
+        return QSize(self._target_size.width(), self._target_size.height() + title_h)
 
     def set_active(self, active: bool):
-        if active:
-            self.setStyleSheet("QFrame { background:#111; border: 2px solid #4da3ff; }")
-            self.title.setStyleSheet("color:#e6f1ff; background:#1b2a3a; padding:4px 8px;")
-        else:
-            self.setStyleSheet("QFrame { background:#111; border: 1px solid #333; }")
-            self.title.setStyleSheet("color:#bbb; background:#222; padding:4px 8px;")
+        """
+        --- MODIFIED: Uses properties instead of stylesheets ---
+        Sets a property on the widget which the main stylesheet can use
+        to change its appearance (e.g., border color).
+        """
+        self.setProperty("active", active)
+        # Re-polish the widget to force a style update
+        self.style().unpolish(self)
+        self.style().polish(self)
 
     def on_frame(self, qimg: QImage):
-        if qimg.isNull():
-            return
+        if qimg.isNull(): return
         pm = QPixmap.fromImage(qimg)
-        if pm.isNull():
-            return
-        scaled = pm.scaled(self._target_size, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        if pm.isNull(): return
+        scaled = pm.scaled(
+            self._target_size, 
+            Qt.AspectRatioMode.KeepAspectRatio, 
+            Qt.TransformationMode.SmoothTransformation
+        )
         self._last_pix = scaled
         self.video_lbl.setPixmap(scaled)
 
@@ -73,11 +81,11 @@ class FullscreenVideo(QWidget):
         self.setWindowTitle("RTSP — Fullscreen")
         self.setWindowFlag(Qt.WindowType.FramelessWindowHint, True)
         self.setWindowState(Qt.WindowState.WindowFullScreen)
+        # This simple style is fine to keep here
         self.setStyleSheet("background:black;")
 
         self.video_lbl = QLabel(self)
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.video_lbl.setStyleSheet("background:black;")
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -94,7 +102,11 @@ class FullscreenVideo(QWidget):
         pm = QPixmap.fromImage(qimg)
         if pm.isNull():
             return
-        scaled = pm.scaled(self._target_size(), Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
+        scaled = pm.scaled(
+            self._target_size(), 
+            Qt.AspectRatioMode.KeepAspectRatio, 
+            Qt.TransformationMode.SmoothTransformation
+        )
         self.video_lbl.setPixmap(scaled)
 
     def keyPressEvent(self, e):
