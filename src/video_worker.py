@@ -62,10 +62,13 @@ class VideoWorker(QObject):
                         self.status.emit("No video stream found")
                         break
                     stream.thread_type = "AUTO"
-                    try:
-                        stream.codec_context.skip_frame = "NONKEY"
-                    except Exception:
-                        pass
+                    
+                    # Removed the line to skip non-keyframes for a smoother stream.
+                    # try:
+                    #     stream.codec_context.skip_frame = "NONKEY"
+                    # except Exception:
+                    #     pass
+                    
                     self.status.emit("Playing")
                     for frame in container.decode(stream):
                         if self._stop.is_set():
