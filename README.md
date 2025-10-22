@@ -57,7 +57,7 @@ pip install -r requirements.txt
 Run the viewer:
 
 ```bash
-venv/bin/python rtsp_viewer.py
+venv/bin/python main.py
 ```
 
 You’ll see a **2×2 camera panel grid**.
@@ -119,13 +119,13 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 ## Directory Structure
 
 ```
-rtsp/
+rtsp-client/
 ├── config.json          # Optional saved configuration
 ├── LICENSE              # License file
 ├── README.md            # This file
 ├── requirements.txt     # Dependencies list
 ├── rtsp-url.txt         # Example RTSP URL(s) or notes
-├── rtsp_viewer.py       # Main application
+├── main.py              # Main application (single-file)
 └── venv/                # (Optional) Python virtual environment
 ```
 
