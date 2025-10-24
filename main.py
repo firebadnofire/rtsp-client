@@ -8,11 +8,11 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import av
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QPixmap, QCursor
+from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
     QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame,
-    QSizePolicy
+    QSizePolicy, QListView
 )
 
 # ============================================================================
@@ -488,6 +488,40 @@ class RtspApp(QWidget):
         """
         self.setStyleSheet(stylesheet)
 
+    def _build_combo(self, items: List[str]) -> QComboBox:
+        combo = QComboBox(self)
+        combo.setView(QListView())
+        combo.addItems(items)
+        self._tint_combo_palette(combo)
+        return combo
+
+    def _tint_combo_palette(self, combo: QComboBox):
+        """Ensure combo boxes remain legible across native styles (notably macOS)."""
+        palette = combo.palette()
+        dark_bg = QColor("#3c3d3f")
+        text_fg = QColor("#e8eaed")
+        highlight_bg = QColor("#8ab4f8")
+        highlight_fg = QColor("#202124")
+
+        palette.setColor(QPalette.ColorRole.Base, dark_bg)
+        palette.setColor(QPalette.ColorRole.Window, dark_bg)
+        palette.setColor(QPalette.ColorRole.Button, dark_bg)
+        palette.setColor(QPalette.ColorRole.ButtonText, text_fg)
+        palette.setColor(QPalette.ColorRole.Text, text_fg)
+        palette.setColor(QPalette.ColorRole.Highlight, highlight_bg)
+        palette.setColor(QPalette.ColorRole.HighlightedText, highlight_fg)
+
+        combo.setPalette(palette)
+
+        view = combo.view()
+        view.setPalette(palette)
+        view.setStyleSheet(
+            "background-color: #3c3d3f;"
+            "color: #e8eaed;"
+            "selection-background-color: #8ab4f8;"
+            "selection-color: #202124;"
+        )
+
     def _init_ui(self):
         # --- Controls (apply to the currently active panel) ---
         self.title_edit = QLineEdit(self)
@@ -499,13 +533,10 @@ class RtspApp(QWidget):
         self.port_spin.setRange(1, 65535)
         self.slug_edit = QLineEdit(self)
         
-        self.channel_combo = QComboBox(self)
-        self.channel_combo.addItems([str(i) for i in range(1, 17)])
-        self.subtype_combo = QComboBox(self)
-        self.subtype_combo.addItems(["0", "1", "2"])
+        self.channel_combo = self._build_combo([str(i) for i in range(1, 17)])
+        self.subtype_combo = self._build_combo(["0", "1", "2"])
 
-        self.transport_combo = QComboBox(self)
-        self.transport_combo.addItems(["tcp", "udp"])
+        self.transport_combo = self._build_combo(["tcp", "udp"])
         self.latency_spin = QSpinBox(self)
         self.latency_spin.setRange(0, 5000)
         self.latency_spin.setSuffix(" ms")
