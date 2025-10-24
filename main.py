@@ -4,14 +4,15 @@ import sys
 import json
 import threading
 import time
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple
 
 import av
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QPixmap, QCursor
+from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
-    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame
+    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame,
+    QSizePolicy, QListView
 )
 
 # ============================================================================
@@ -130,15 +131,22 @@ class VideoWorker(QObject):
 class VideoPane(QFrame):
     clicked = pyqtSignal(int)
 
-    def __init__(self, index: int, title: str = "", target_size: QSize = QSize(PANE_TARGET_W, PANE_TARGET_H)):
+    def __init__(
+        self,
+        index: int,
+        title: str = "",
+        target_size: QSize = QSize(PANE_TARGET_W, PANE_TARGET_H),
+        scale: float = 1.0,
+    ):
         super().__init__()
         self.index = index
         # --- MODIFIED: Removed object name, will style based on class ---
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        
+
         # --- MODIFIED: Removed inline stylesheet ---
         self._last_pix: Optional[QPixmap] = None
         self._target_size = target_size
+        self._scale = scale
 
         self.title = QLabel(title or f"Feed {index+1}")
         # --- MODIFIED: Added object name for specific styling ---
@@ -149,16 +157,17 @@ class VideoPane(QFrame):
         self.video_lbl.setObjectName("video_lbl")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_lbl.setText("No video")
-        self.video_lbl.setFixedSize(self._target_size)
+        self.video_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.video_lbl.setMinimumSize(self._target_size)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
-        v.setSpacing(0)
+        v.setSpacing(max(0, int(4 * self._scale)))
         v.addWidget(self.title)
         wrap = QHBoxLayout()
-        wrap.addStretch(1)
-        wrap.addWidget(self.video_lbl)
-        wrap.addStretch(1)
+        wrap.setContentsMargins(0, 0, 0, 0)
+        wrap.setSpacing(0)
+        wrap.addWidget(self.video_lbl, 1)
         v.addLayout(wrap, 1)
 
     def sizeHint(self) -> QSize:
@@ -181,18 +190,30 @@ class VideoPane(QFrame):
         if qimg.isNull(): return
         pm = QPixmap.fromImage(qimg)
         if pm.isNull(): return
-        scaled = pm.scaled(
-            self._target_size, 
-            Qt.AspectRatioMode.KeepAspectRatio, 
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self._last_pix = scaled
-        self.video_lbl.setPixmap(scaled)
+        self._last_pix = pm
+        self._update_pixmap()
 
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self.clicked.emit(self.index)
         super().mousePressEvent(e)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_pixmap()
+
+    def _update_pixmap(self):
+        if not self._last_pix:
+            return
+        target = self.video_lbl.size()
+        if target.width() <= 0 or target.height() <= 0:
+            return
+        scaled = self._last_pix.scaled(
+            target,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation
+        )
+        self.video_lbl.setPixmap(scaled)
 
 
 class FullscreenVideo(QWidget):
@@ -261,7 +282,23 @@ class RtspApp(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("RTSP Viewer")
-        self.resize(PANE_TARGET_W * 2 + 420, PANE_TARGET_H * 2 + 40)
+
+        self._scale = self._calculate_scale()
+        self._pane_target = QSize(
+            max(320, int(PANE_TARGET_W * self._scale)),
+            max(180, int(PANE_TARGET_H * self._scale))
+        )
+        self._controls_width = max(260, int(400 * self._scale))
+        self._grid_spacing = max(6, int(10 * self._scale))
+        self._main_spacing = max(10, int(16 * self._scale))
+        self._section_spacing = max(8, int(18 * self._scale))
+        self._form_spacing = max(6, int(10 * self._scale))
+        self._layout_margin = max(12, int(20 * self._scale))
+        self._footer_height = max(40, int(52 * self._scale))
+
+        init_w, init_h = self._initial_window_dimensions()
+        self.resize(init_w, init_h)
+        self.setMinimumSize(int(init_w * 0.85), int(init_h * 0.85))
 
         # Per-panel state
         self.panel_states: List[Dict[str, Any]] = [
@@ -274,7 +311,7 @@ class RtspApp(QWidget):
         ]
         self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
         self.active_index: int = 0
-        
+
         # UI Initialization
         self._init_ui()
         # Apply the modern, centralized stylesheet
@@ -293,131 +330,197 @@ class RtspApp(QWidget):
         self._sync_ui_from_state()
         self._update_active_styles()
 
+    def _calculate_scale(self) -> float:
+        screen = QApplication.primaryScreen()
+        if not screen:
+            return 1.0
+        available = screen.availableGeometry()
+        base_width = PANE_TARGET_W * 2 + 420
+        base_height = PANE_TARGET_H * 2 + 120
+        scale_w = available.width() / base_width if base_width else 1.0
+        scale_h = available.height() / base_height if base_height else 1.0
+        scale = min(scale_w, scale_h, 1.0)
+        return max(scale, 0.4)
+
+    def _initial_window_dimensions(self) -> Tuple[int, int]:
+        grid_width = self._pane_target.width() * 2 + self._grid_spacing
+        total_width = grid_width + self._controls_width + self._main_spacing + self._layout_margin * 2
+        grid_height = self._pane_target.height() * 2 + self._grid_spacing
+        total_height = grid_height + self._footer_height + self._layout_margin * 2
+        return total_width, total_height
+
     def _apply_modern_stylesheet(self):
         """Defines and applies the Material/Fluent inspired application stylesheet."""
-        stylesheet = """
+        controls_label_font = max(9, round(10 * self._scale))
+        controls_heading_font = max(controls_label_font + 1, round(12 * self._scale))
+        input_radius = max(4, round(6 * self._scale))
+        input_padding = max(6, round(8 * self._scale))
+        button_radius = max(4, round(6 * self._scale))
+        button_pad_v = max(6, round(10 * self._scale))
+        button_pad_h = max(10, round(16 * self._scale))
+        pane_radius = max(6, round(8 * self._scale))
+        pane_title_padding_v = max(4, round(6 * self._scale))
+        pane_title_padding_h = max(6, round(10 * self._scale))
+        pane_title_radius = max(4, round(6 * self._scale))
+        spin_button_width = max(14, round(18 * self._scale))
+
+        stylesheet = f"""
             /* GENERAL */
-            RtspApp, FullscreenVideo {
+            RtspApp, FullscreenVideo {{
                 background-color: #202124; /* Very dark grey background */
-            }
-            QLabel {
+            }}
+            QLabel {{
                 color: #e8eaed; /* Light grey text */
-            }
+            }}
 
             /* CONTROLS WIDGET (LEFT PANE) */
-            QWidget#controls_widget {
+            QWidget#controls_widget {{
                 background-color: #2d2e30;
-                border-radius: 8px;
-            }
-            QWidget#controls_widget QLabel {
-                font-size: 10pt;
-            }
-            QWidget#controls_widget QLabel b {
-                font-size: 12pt;
-            }
+                border-radius: {pane_radius}px;
+            }}
+            QWidget#controls_widget QLabel {{
+                font-size: {controls_label_font}pt;
+            }}
+            QWidget#controls_widget QLabel b {{
+                font-size: {controls_heading_font}pt;
+            }}
 
             /* INPUT WIDGETS */
-            QLineEdit, QSpinBox, QComboBox {
+            QLineEdit, QSpinBox, QComboBox {{
                 background-color: #3c3d3f;
                 color: #e8eaed;
                 border: 1px solid #5f6368;
-                border-radius: 4px;
-                padding: 8px;
-                font-size: 10pt;
-            }
-            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {
+                border-radius: {input_radius}px;
+                padding: {input_padding}px;
+                font-size: {controls_label_font}pt;
+            }}
+            QLineEdit:focus, QSpinBox:focus, QComboBox:focus {{
                 border: 1px solid #8ab4f8; /* Google blue for focus */
-            }
-            QLineEdit[readOnly="true"] {
+            }}
+            QLineEdit[readOnly="true"] {{
                 background-color: #202124;
                 color: #9aa0a6;
-            }
-            QSpinBox::up-button, QSpinBox::down-button {
-                width: 18px;
-            }
-            
+            }}
+            QSpinBox::up-button, QSpinBox::down-button {{
+                width: {spin_button_width}px;
+            }}
+
             /* --- FIX FOR COMBOBOX DROPDOWN --- */
-            QComboBox::drop-down {
+            QComboBox::drop-down {{
                 border: none;
-            }
-            QComboBox QAbstractItemView {
+            }}
+            QComboBox QAbstractItemView {{
                 background-color: #3c3d3f; /* Dark background for the list */
                 color: #e8eaed; /* Light text for items */
                 selection-background-color: #8ab4f8; /* Blue for selected item */
                 selection-color: #202124; /* Dark text for selected item */
                 border: 1px solid #5f6368;
-                border-radius: 4px;
+                border-radius: {input_radius}px;
                 outline: 0px; /* Remove focus outline */
-            }
+            }}
             /* --- END FIX --- */
 
             /* BUTTONS */
-            QPushButton {
+            QPushButton {{
                 background-color: #5f6368;
                 color: #e8eaed;
                 border: none;
-                border-radius: 4px;
-                padding: 10px 16px;
-                font-size: 10pt;
+                border-radius: {button_radius}px;
+                padding: {button_pad_v}px {button_pad_h}px;
+                font-size: {controls_label_font}pt;
                 font-weight: bold;
-            }
-            QPushButton:hover {
+            }}
+            QPushButton:hover {{
                 background-color: #70757a;
-            }
-            QPushButton:pressed {
+            }}
+            QPushButton:pressed {{
                 background-color: #505357;
-            }
-            QPushButton:disabled {
+            }}
+            QPushButton:disabled {{
                 background-color: #3c3d3f;
                 color: #70757a;
-            }
+            }}
 
             /* PRIMARY ACTION BUTTONS */
-            QPushButton#start_btn, QPushButton#start_all_btn {
+            QPushButton#start_btn, QPushButton#start_all_btn {{
                 background-color: #8ab4f8;
                 color: #202124;
-            }
-            QPushButton#start_btn:hover, QPushButton#start_all_btn:hover {
+            }}
+            QPushButton#start_btn:hover, QPushButton#start_all_btn:hover {{
                 background-color: #a1c3fb;
-            }
-            
+            }}
+
             /* DESTRUCTIVE ACTION BUTTONS */
-            QPushButton#stop_btn:hover, QPushButton#stop_all_btn:hover {
+            QPushButton#stop_btn:hover, QPushButton#stop_all_btn:hover {{
                 background-color: #f28b82; /* Google red for stop hover */
                 color: #202124;
-            }
+            }}
 
             /* VIDEO PANE STYLING */
-            VideoPane {
+            VideoPane {{
                 background-color: #2d2e30;
                 border: 2px solid #3c3d3f;
-                border-radius: 8px;
-            }
-            VideoPane[active="true"] {
+                border-radius: {pane_radius}px;
+            }}
+            VideoPane[active="true"] {{
                 border: 2px solid #8ab4f8;
-            }
-            
-            QLabel#pane_title {
-                font-size: 9pt;
+            }}
+
+            QLabel#pane_title {{
+                font-size: {max(8, round(9 * self._scale))}pt;
                 font-weight: bold;
                 color: #bdc1c6;
-                padding: 6px 10px;
+                padding: {pane_title_padding_v}px {pane_title_padding_h}px;
                 background-color: transparent;
-            }
-            
-            VideoPane[active="true"] QLabel#pane_title {
+            }}
+
+            VideoPane[active="true"] QLabel#pane_title {{
                 color: #202124;
                 background-color: #8ab4f8;
-                border-top-left-radius: 6px; /* Match parent radius */
-                border-top-right-radius: 6px;
-            }
-            
-            QLabel#video_lbl {
+                border-top-left-radius: {pane_title_radius}px; /* Match parent radius */
+                border-top-right-radius: {pane_title_radius}px;
+            }}
+
+            QLabel#video_lbl {{
                 background-color: #000000;
                 color: #5f6368;
-            }
+            }}
         """
         self.setStyleSheet(stylesheet)
+
+    def _build_combo(self, items: List[str]) -> QComboBox:
+        combo = QComboBox(self)
+        combo.setView(QListView())
+        combo.addItems(items)
+        self._tint_combo_palette(combo)
+        return combo
+
+    def _tint_combo_palette(self, combo: QComboBox):
+        """Ensure combo boxes remain legible across native styles (notably macOS)."""
+        palette = combo.palette()
+        dark_bg = QColor("#3c3d3f")
+        text_fg = QColor("#e8eaed")
+        highlight_bg = QColor("#8ab4f8")
+        highlight_fg = QColor("#202124")
+
+        palette.setColor(QPalette.ColorRole.Base, dark_bg)
+        palette.setColor(QPalette.ColorRole.Window, dark_bg)
+        palette.setColor(QPalette.ColorRole.Button, dark_bg)
+        palette.setColor(QPalette.ColorRole.ButtonText, text_fg)
+        palette.setColor(QPalette.ColorRole.Text, text_fg)
+        palette.setColor(QPalette.ColorRole.Highlight, highlight_bg)
+        palette.setColor(QPalette.ColorRole.HighlightedText, highlight_fg)
+
+        combo.setPalette(palette)
+
+        view = combo.view()
+        view.setPalette(palette)
+        view.setStyleSheet(
+            "background-color: #3c3d3f;"
+            "color: #e8eaed;"
+            "selection-background-color: #8ab4f8;"
+            "selection-color: #202124;"
+        )
 
     def _init_ui(self):
         # --- Controls (apply to the currently active panel) ---
@@ -430,13 +533,10 @@ class RtspApp(QWidget):
         self.port_spin.setRange(1, 65535)
         self.slug_edit = QLineEdit(self)
         
-        self.channel_combo = QComboBox(self)
-        self.channel_combo.addItems([str(i) for i in range(1, 17)])
-        self.subtype_combo = QComboBox(self)
-        self.subtype_combo.addItems(["0", "1", "2"])
+        self.channel_combo = self._build_combo([str(i) for i in range(1, 17)])
+        self.subtype_combo = self._build_combo(["0", "1", "2"])
 
-        self.transport_combo = QComboBox(self)
-        self.transport_combo.addItems(["tcp", "udp"])
+        self.transport_combo = self._build_combo(["tcp", "udp"])
         self.latency_spin = QSpinBox(self)
         self.latency_spin.setRange(0, 5000)
         self.latency_spin.setSuffix(" ms")
@@ -461,9 +561,11 @@ class RtspApp(QWidget):
         self.status_lbl = QLabel("Idle")
 
         # --- 2x2 Grid of Video Panes ---
-        self.panes: List[VideoPane] = [VideoPane(i) for i in range(4)]
+        self.panes: List[VideoPane] = [
+            VideoPane(i, target_size=self._pane_target, scale=self._scale) for i in range(4)
+        ]
         grid = QGridLayout()
-        grid.setSpacing(10)
+        grid.setSpacing(self._grid_spacing)
         grid.addWidget(self.panes[0], 0, 0)
         grid.addWidget(self.panes[1], 0, 1)
         grid.addWidget(self.panes[2], 1, 0)
@@ -473,11 +575,18 @@ class RtspApp(QWidget):
         controls_widget = QWidget()
         controls_widget.setObjectName("controls_widget")
         controls_layout = QVBoxLayout(controls_widget)
-        controls_layout.setSpacing(12)
-        controls_widget.setFixedWidth(400)
-        
+        controls_layout.setSpacing(self._section_spacing)
+        controls_layout.setContentsMargins(
+            self._section_spacing,
+            self._section_spacing,
+            self._section_spacing,
+            self._section_spacing,
+        )
+        controls_widget.setMinimumWidth(self._controls_width)
+        controls_widget.setMaximumWidth(self._controls_width)
+
         form = QFormLayout()
-        form.setSpacing(10)
+        form.setSpacing(self._form_spacing)
         form.addRow("Title:", self.title_edit)
         form.addRow("Username:", self.user_edit)
         form.addRow("Password:", self.pass_edit)
@@ -491,19 +600,22 @@ class RtspApp(QWidget):
 
         # Button row for individual stream actions
         single_stream_actions = QHBoxLayout()
+        single_stream_actions.setSpacing(self._form_spacing)
         single_stream_actions.addWidget(self.start_btn)
         single_stream_actions.addWidget(self.stop_btn)
         single_stream_actions.addWidget(self.snapshot_btn)
         single_stream_actions.addWidget(self.fullscreen_btn)
-        
+
         # Row for global stream controls
         global_stream_actions = QHBoxLayout()
+        global_stream_actions.setSpacing(self._form_spacing)
         global_stream_actions.addWidget(self.start_all_btn)
         global_stream_actions.addWidget(self.stop_all_btn)
         global_stream_actions.addStretch(1) # Push buttons to the left
 
         # Row for configuration controls
         config_actions = QHBoxLayout()
+        config_actions.setSpacing(self._form_spacing)
         config_actions.addWidget(self.save_cfg_btn)
         config_actions.addWidget(self.load_cfg_btn)
         config_actions.addStretch(1) # Push buttons to the left
@@ -511,24 +623,32 @@ class RtspApp(QWidget):
         # Assemble the controls in the left-side vertical layout
         controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
         controls_layout.addLayout(form)
-        controls_layout.addSpacing(10)
+        controls_layout.addSpacing(max(6, int(self._section_spacing * 0.6)))
         controls_layout.addWidget(QLabel("RTSP URL Preview:"))
         controls_layout.addWidget(self.url_preview)
         controls_layout.addLayout(single_stream_actions)
-        controls_layout.addSpacing(20) # Add a visual separator
+        controls_layout.addSpacing(max(12, int(self._section_spacing * 1.1))) # Add a visual separator
 
         # Add a title for the global actions section
         controls_layout.addWidget(QLabel("<b>Global Actions</b>"))
-        controls_layout.addLayout(global_stream_actions) 
-        controls_layout.addLayout(config_actions)      
+        controls_layout.addLayout(global_stream_actions)
+        controls_layout.addLayout(config_actions)
         controls_layout.addStretch(1)
-        
+
         main_layout = QHBoxLayout()
-        main_layout.setSpacing(10)
+        main_layout.setSpacing(self._main_spacing)
+        main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(controls_widget)
         main_layout.addLayout(grid, 1)
 
         top_level_layout = QVBoxLayout(self)
+        top_level_layout.setContentsMargins(
+            self._layout_margin,
+            self._layout_margin,
+            self._layout_margin,
+            self._layout_margin,
+        )
+        top_level_layout.setSpacing(self._section_spacing)
         top_level_layout.addLayout(main_layout)
         top_level_layout.addWidget(self.status_lbl)
 
