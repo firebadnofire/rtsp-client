@@ -732,28 +732,29 @@ class RtspApp(QWidget):
         recording_dir_layout.addWidget(self.recording_dir_btn)
         form.addRow("Recording Dir:", recording_dir_layout)
 
-        # Button row for individual stream actions
-        single_stream_actions = QHBoxLayout()
-        single_stream_actions.setSpacing(self._form_spacing)
-        single_stream_actions.addWidget(self.start_btn)
-        single_stream_actions.addWidget(self.stop_btn)
-        single_stream_actions.addWidget(self.snapshot_btn)
-        single_stream_actions.addWidget(self.record_btn)
-        single_stream_actions.addWidget(self.fullscreen_btn)
+        # Button rows for individual stream actions - split into two rows to prevent clipping
+        stream_control_row1 = QHBoxLayout()
+        stream_control_row1.setSpacing(self._form_spacing)
+        stream_control_row1.addWidget(self.start_btn)
+        stream_control_row1.addWidget(self.stop_btn)
+        stream_control_row1.addWidget(self.fullscreen_btn)
+        
+        stream_control_row2 = QHBoxLayout()
+        stream_control_row2.setSpacing(self._form_spacing)
+        stream_control_row2.addWidget(self.snapshot_btn)
+        stream_control_row2.addWidget(self.record_btn)
 
         # Row for global stream controls
         global_stream_actions = QHBoxLayout()
         global_stream_actions.setSpacing(self._form_spacing)
         global_stream_actions.addWidget(self.start_all_btn)
         global_stream_actions.addWidget(self.stop_all_btn)
-        global_stream_actions.addStretch(1) # Push buttons to the left
 
         # Row for configuration controls
         config_actions = QHBoxLayout()
         config_actions.setSpacing(self._form_spacing)
         config_actions.addWidget(self.save_cfg_btn)
         config_actions.addWidget(self.load_cfg_btn)
-        config_actions.addStretch(1) # Push buttons to the left
 
         # Assemble the controls in the left-side vertical layout
         controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
@@ -761,7 +762,8 @@ class RtspApp(QWidget):
         controls_layout.addSpacing(max(6, int(self._section_spacing * 0.6)))
         controls_layout.addWidget(QLabel("RTSP URL Preview:"))
         controls_layout.addWidget(self.url_preview)
-        controls_layout.addLayout(single_stream_actions)
+        controls_layout.addLayout(stream_control_row1)
+        controls_layout.addLayout(stream_control_row2)
         controls_layout.addSpacing(max(12, int(self._section_spacing * 1.1))) # Add a visual separator
 
         # Add a title for the global actions section
