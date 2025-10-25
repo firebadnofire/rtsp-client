@@ -149,6 +149,7 @@ class VideoWorker(QObject):
                                     self._output_stream.pix_fmt = 'yuv420p'
                                     # Use a reasonable bitrate
                                     self._output_stream.bit_rate = 2000000
+                                    self._frame_count = 0
                                 except Exception as e:
                                     self.status.emit(f"Recording init failed: {e}")
                                     self._recording = False
@@ -162,8 +163,9 @@ class VideoWorker(QObject):
                                         frame.to_ndarray(format='rgb24'), 
                                         format='rgb24'
                                     )
-                                    new_frame.pts = frame.pts
-                                    new_frame.time_base = frame.time_base
+                                    # Set pts for proper timing
+                                    new_frame.pts = self._frame_count
+                                    self._frame_count += 1
                                     
                                     for packet in self._output_stream.encode(new_frame):
                                         self._output_container.mux(packet)
