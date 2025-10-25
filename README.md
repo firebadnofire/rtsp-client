@@ -1,7 +1,7 @@
 # RTSP Viewer — 4-Panel Fixed Resolution
 
 A PyQt6 + PyAV-based desktop application for viewing and managing up to **four simultaneous RTSP camera feeds** in a fixed-resolution 2×2 grid layout.
-Supports per-panel configuration, fullscreen viewing, snapshots, and persistent config saving/loading.
+Supports per-panel configuration, fullscreen viewing, snapshots, video recording, name tags, and persistent config saving/loading.
 
 ---
 
@@ -11,14 +11,23 @@ Supports per-panel configuration, fullscreen viewing, snapshots, and persistent 
 * **Start/Stop per panel** or **start/stop all at once**.
 * **Live RTSP URL preview** as you edit connection settings.
 * **TCP/UDP transport selection** with configurable latency.
-* **Snapshot capture** to PNG/JPEG.
+* **Snapshot capture** to PNG/JPEG with optional name tag overlay.
+* **Video recording** to MP4 format with per-panel controls.
+* **Name tags** for panels (optional alternative to numeric identifiers).
+* **Name tag overlay** toggle for displaying panel names on videos and snapshots.
+* **Media Manager** for post-processing:
+  * Rename recorded videos and snapshots
+  * Trim video clips
+  * Add text overlays to images
 * **Fullscreen mode** for the active panel.
 * **Save and load configuration** (`.json`), including:
 
   * All panel connection settings
+  * Name tags and overlay preferences
   * Window geometry
   * Running states (with optional auto-restart on load)
 * **Reconnect on error** with automatic retries.
+* **Backward compatible** with older configuration files.
 * **Minimal, responsive UI** using PyQt6.
 
 ---
@@ -31,8 +40,9 @@ This application uses:
 * [PyQt6](https://pypi.org/project/PyQt6/)
 * [PyAV](https://github.com/PyAV-Org/PyAV) (FFmpeg bindings)
 * [NumPy](https://numpy.org/)
+* [Pillow](https://python-pillow.org/) (for text overlays)
 
-Make sure FFmpeg is installed on your system — PyAV depends on it:
+Make sure FFmpeg is installed on your system — PyAV depends on it and it's also required for video trimming:
 
 ```bash
 # Example for Debian/Ubuntu
@@ -91,16 +101,45 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 
 ### Controls
 
+#### Per-Panel Controls
+
+| Button/Field              | Function                                                           |
+| ------------------------- | ------------------------------------------------------------------ |
+| **Title**                 | Set the panel title (displayed in status messages)                |
+| **Name Tag**              | Optional name tag to replace numeric identifier                    |
+| **Overlay checkbox**      | Toggle name tag overlay on videos and snapshots                    |
+| **Start**                 | Start the active panel's stream                                    |
+| **Stop**                  | Stop the active panel's stream                                     |
+| **Start Recording**       | Begin recording the active panel's video to MP4                    |
+| **Stop Recording**        | Stop recording and save the video file                             |
+| **Snapshot**              | Save current frame from active panel (with optional overlay)       |
+| **Fullscreen**            | View active feed fullscreen (Esc/F11/Q to exit)                    |
+
+#### Global Controls
+
 | Button                  | Function                                                    |
 | ----------------------- | ----------------------------------------------------------- |
-| **Start**               | Start the active panel's stream                             |
-| **Stop**                | Stop the active panel's stream                              |
-| **Snapshot**            | Save current frame from active panel                        |
-| **Fullscreen (active)** | View active feed fullscreen (Esc/F11/Q to exit)             |
 | **Start All**           | Start all configured streams                                |
 | **Stop All**            | Stop all streams                                            |
 | **Save Config…**        | Save all panel settings + UI state                          |
 | **Load Config…**        | Load panel settings + optionally auto-start running streams |
+| **Media Manager**       | Open post-processing dialog for videos and images           |
+
+---
+
+### Media Manager
+
+The **Media Manager** dialog provides post-processing capabilities for recorded videos and screenshots:
+
+* **Rename**: Change the filename of any media file
+* **Add Text Overlay**: Add custom text overlays to images (with position control)
+* **Trim Video**: Cut video clips to a specific time range using FFmpeg
+
+To use the Media Manager:
+1. Click the **Media Manager** button
+2. Browse and select a video or image file
+3. Choose an operation (rename, overlay, or trim)
+4. The processed file will be saved with a modified name to avoid overwriting
 
 ---
 
@@ -110,9 +149,12 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 * **rtsp-url.txt** — example RTSP URLs or notes (not used automatically).
 * Saved configs store:
 
-  * Per-panel credentials, host, port, slug, channel, subtype, transport, latency, and running state.
-  * Active panel index and window size.
-  * Fullscreen visibility.
+  * Per-panel credentials, host, port, slug, channel, subtype, transport, latency, and running state
+  * Name tags and overlay preferences
+  * Active panel index and window size
+  * Fullscreen visibility
+
+**Note**: Configuration files are backward compatible. Old config files (version 1) will automatically be updated with default values for new fields when loaded.
 
 ---
 
