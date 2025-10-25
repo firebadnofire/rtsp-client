@@ -12,6 +12,7 @@ Supports per-panel configuration, fullscreen viewing, snapshots, and persistent 
 * **Live RTSP URL preview** as you edit connection settings.
 * **TCP/UDP transport selection** with configurable latency.
 * **Snapshot capture** to PNG/JPEG.
+* **Live recording** to crash-safe MKV format - record any camera feed while viewing.
 * **Fullscreen mode** for the active panel.
 * **Save and load configuration** (`.json`), including:
 
@@ -96,11 +97,34 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 | **Start**               | Start the active panel's stream                             |
 | **Stop**                | Stop the active panel's stream                              |
 | **Snapshot**            | Save current frame from active panel                        |
+| **Record**              | Start/stop recording the active panel to MKV file           |
 | **Fullscreen (active)** | View active feed fullscreen (Esc/F11/Q to exit)             |
 | **Start All**           | Start all configured streams                                |
 | **Stop All**            | Stop all streams                                            |
 | **Save Config…**        | Save all panel settings + UI state                          |
 | **Load Config…**        | Load panel settings + optionally auto-start running streams |
+
+---
+
+### Recording
+
+The recording feature allows you to capture the live RTSP stream to a crash-safe MKV file:
+
+1. Start streaming from a camera panel
+2. Click the **Record** button to begin recording
+3. Choose a location to save the `.mkv` file
+4. The button turns red and changes to "Stop Recording" while active
+5. Click **Stop Recording** to finish and close the file
+
+**Technical Details:**
+
+* **Format:** Matroska (MKV) container with H.264 video codec
+* **Crash-safe:** MKV format allows recovery of recorded video even if the application crashes
+* **Parallel recording:** Can record multiple camera feeds simultaneously
+* **Quality:** 2 Mbps bitrate, YUV420p color space
+* **Frame rate:** Matches the source stream frame rate (typically 30 fps)
+
+The recording runs in parallel with live viewing and will automatically stop when you stop the stream.
 
 ---
 
