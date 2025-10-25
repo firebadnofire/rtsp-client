@@ -5,14 +5,18 @@ import json
 import threading
 import time
 from typing import Optional, List, Dict, Any, Tuple
+from datetime import datetime
+from pathlib import Path
 
 import av
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize
 from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
     QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame,
-    QSizePolicy, QListView
+    QSizePolicy, QListView, QCheckBox, QDialog, QTextEdit, QSlider
 )
 
 # ============================================================================
@@ -124,6 +128,190 @@ class VideoWorker(QObject):
         self.stopped.emit()
 
 
+class VideoRecorder:
+    """Handles video recording to file using PyAV."""
+    
+    def __init__(self):
+        self._container: Optional[av.container.OutputContainer] = None
+        self._stream: Optional[av.stream.Stream] = None
+        self._lock = threading.Lock()
+        self._is_recording = False
+        self._output_path: Optional[str] = None
+        self._frame_count = 0
+        
+    def start_recording(self, output_path: str, width: int, height: int, fps: int = 25) -> bool:
+        """Start recording video to the specified path."""
+        with self._lock:
+            if self._is_recording:
+                return False
+            
+            try:
+                self._output_path = output_path
+                self._container = av.open(output_path, mode='w')
+                self._stream = self._container.add_stream('h264', rate=fps)
+                self._stream.width = width
+                self._stream.height = height
+                self._stream.pix_fmt = 'yuv420p'
+                # Use medium preset for balance between speed and quality
+                self._stream.options = {'preset': 'medium', 'crf': '23'}
+                self._is_recording = True
+                self._frame_count = 0
+                return True
+            except Exception as e:
+                print(f"Failed to start recording: {e}")
+                self._cleanup()
+                return False
+    
+    def write_frame(self, qimage: QImage) -> bool:
+        """Write a QImage frame to the video file."""
+        with self._lock:
+            if not self._is_recording or self._stream is None:
+                return False
+            
+            try:
+                # Convert QImage to numpy array
+                width = qimage.width()
+                height = qimage.height()
+                ptr = qimage.bits()
+                ptr.setsize(height * width * 4)  # 4 bytes per pixel for RGB888
+                arr = np.frombuffer(ptr, np.uint8).reshape((height, width, 4))
+                
+                # Convert RGBA to RGB if needed
+                if arr.shape[2] == 4:
+                    arr = arr[:, :, :3]
+                
+                # Create video frame
+                frame = av.VideoFrame.from_ndarray(arr, format='rgb24')
+                
+                # Encode and write
+                for packet in self._stream.encode(frame):
+                    self._container.mux(packet)
+                
+                self._frame_count += 1
+                return True
+            except Exception as e:
+                print(f"Failed to write frame: {e}")
+                return False
+    
+    def stop_recording(self) -> Optional[str]:
+        """Stop recording and return the output path."""
+        with self._lock:
+            if not self._is_recording:
+                return None
+            
+            output_path = self._output_path
+            
+            try:
+                # Flush remaining frames
+                if self._stream is not None:
+                    for packet in self._stream.encode():
+                        self._container.mux(packet)
+            except Exception as e:
+                print(f"Error flushing frames: {e}")
+            
+            self._cleanup()
+            return output_path if self._frame_count > 0 else None
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        with self._lock:
+            return self._is_recording
+    
+    def _cleanup(self):
+        """Clean up resources."""
+        try:
+            if self._container is not None:
+                self._container.close()
+        except Exception as e:
+            print(f"Error closing container: {e}")
+        
+        self._container = None
+        self._stream = None
+        self._is_recording = False
+        self._output_path = None
+        self._frame_count = 0
+
+
+# ============================================================================
+# Helper Functions
+# ============================================================================
+
+def overlay_text_on_qimage(qimage: QImage, text: str, position: str = "top-left") -> QImage:
+    """
+    Overlay text on a QImage and return a new QImage.
+    
+    Args:
+        qimage: The source QImage
+        text: Text to overlay
+        position: Position of the text ("top-left", "top-right", "bottom-left", "bottom-right")
+    
+    Returns:
+        New QImage with text overlay
+    """
+    if qimage.isNull() or not text:
+        return qimage
+    
+    # Convert QImage to PIL Image
+    width = qimage.width()
+    height = qimage.height()
+    ptr = qimage.bits()
+    ptr.setsize(height * width * 4)
+    
+    # Create PIL Image from QImage data
+    pil_image = Image.frombytes('RGBA', (width, height), ptr.asarray())
+    
+    # Create drawing context
+    draw = ImageDraw.Draw(pil_image)
+    
+    # Try to use a nice font, fall back to default if not available
+    try:
+        font_size = max(16, int(min(width, height) * 0.04))
+        font = ImageFont.truetype("/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf", font_size)
+    except Exception:
+        try:
+            font = ImageFont.load_default()
+        except Exception:
+            font = None
+    
+    # Get text bounding box
+    if font:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        text_width = bbox[2] - bbox[0]
+        text_height = bbox[3] - bbox[1]
+    else:
+        # Approximate size for default font
+        text_width = len(text) * 8
+        text_height = 12
+    
+    # Calculate position
+    padding = 10
+    if position == "top-left":
+        x, y = padding, padding
+    elif position == "top-right":
+        x, y = width - text_width - padding, padding
+    elif position == "bottom-left":
+        x, y = padding, height - text_height - padding * 2
+    elif position == "bottom-right":
+        x, y = width - text_width - padding, height - text_height - padding * 2
+    else:
+        x, y = padding, padding
+    
+    # Draw background rectangle
+    bg_padding = 5
+    draw.rectangle(
+        [x - bg_padding, y - bg_padding, x + text_width + bg_padding, y + text_height + bg_padding],
+        fill=(0, 0, 0, 180)
+    )
+    
+    # Draw text
+    draw.text((x, y), text, fill=(255, 255, 255, 255), font=font)
+    
+    # Convert back to QImage
+    data = pil_image.tobytes('raw', 'RGBA')
+    result = QImage(data, width, height, QImage.Format.Format_RGBA8888)
+    return result.copy()
+
+
 # ============================================================================
 # Widget Classes (from widgets.py)
 # ============================================================================
@@ -148,9 +336,23 @@ class VideoPane(QFrame):
         self._target_size = target_size
         self._scale = scale
 
+        # Create title container with recording indicator
+        title_container = QWidget()
+        title_layout = QHBoxLayout(title_container)
+        title_layout.setContentsMargins(0, 0, 0, 0)
+        title_layout.setSpacing(max(4, int(6 * self._scale)))
+        
         self.title = QLabel(title or f"Feed {index+1}")
         # --- MODIFIED: Added object name for specific styling ---
         self.title.setObjectName("pane_title")
+        
+        self.recording_indicator = QLabel("⏺")
+        self.recording_indicator.setObjectName("recording_indicator")
+        self.recording_indicator.setStyleSheet("color: red; font-weight: bold;")
+        self.recording_indicator.hide()
+        
+        title_layout.addWidget(self.title, 1)
+        title_layout.addWidget(self.recording_indicator)
 
         self.video_lbl = QLabel()
         # --- MODIFIED: Added object name for specific styling ---
@@ -163,12 +365,19 @@ class VideoPane(QFrame):
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(max(0, int(4 * self._scale)))
-        v.addWidget(self.title)
+        v.addWidget(title_container)
         wrap = QHBoxLayout()
         wrap.setContentsMargins(0, 0, 0, 0)
         wrap.setSpacing(0)
         wrap.addWidget(self.video_lbl, 1)
         v.addLayout(wrap, 1)
+
+    def set_recording(self, recording: bool):
+        """Show or hide the recording indicator."""
+        if recording:
+            self.recording_indicator.show()
+        else:
+            self.recording_indicator.hide()
 
     def sizeHint(self) -> QSize:
         # Manually calculate hint based on layout to be safe
@@ -275,6 +484,241 @@ class FullscreenVideo(QWidget):
 
 
 # ============================================================================
+# Media Manager Dialog
+# ============================================================================
+
+class MediaManagerDialog(QDialog):
+    """Dialog for managing and post-processing recorded videos and screenshots."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Media Manager")
+        self.setMinimumSize(800, 600)
+        
+        layout = QVBoxLayout(self)
+        
+        # Instructions
+        info = QLabel(
+            "<b>Media Post-Processing</b><br>"
+            "Select a video or image file to trim, rename, or add text overlays."
+        )
+        layout.addWidget(info)
+        
+        # File selection
+        file_layout = QHBoxLayout()
+        self.file_path_edit = QLineEdit()
+        self.file_path_edit.setReadOnly(True)
+        browse_btn = QPushButton("Browse...")
+        browse_btn.clicked.connect(self.browse_file)
+        file_layout.addWidget(QLabel("File:"))
+        file_layout.addWidget(self.file_path_edit, 1)
+        file_layout.addWidget(browse_btn)
+        layout.addLayout(file_layout)
+        
+        # Operations section
+        ops_label = QLabel("<b>Operations:</b>")
+        layout.addWidget(ops_label)
+        
+        # Rename
+        rename_layout = QHBoxLayout()
+        self.new_name_edit = QLineEdit()
+        self.new_name_edit.setPlaceholderText("Enter new filename (without extension)")
+        rename_btn = QPushButton("Rename")
+        rename_btn.clicked.connect(self.rename_file)
+        rename_layout.addWidget(QLabel("New Name:"))
+        rename_layout.addWidget(self.new_name_edit, 1)
+        rename_layout.addWidget(rename_btn)
+        layout.addLayout(rename_layout)
+        
+        # Text overlay
+        overlay_layout = QVBoxLayout()
+        overlay_layout.addWidget(QLabel("Add Text Overlay:"))
+        self.overlay_text_edit = QTextEdit()
+        self.overlay_text_edit.setMaximumHeight(60)
+        self.overlay_text_edit.setPlaceholderText("Enter text to overlay")
+        overlay_layout.addWidget(self.overlay_text_edit)
+        
+        overlay_controls = QHBoxLayout()
+        overlay_controls.addWidget(QLabel("Position:"))
+        self.overlay_position_combo = QComboBox()
+        self.overlay_position_combo.addItems(["top-left", "top-right", "bottom-left", "bottom-right"])
+        overlay_controls.addWidget(self.overlay_position_combo)
+        overlay_btn = QPushButton("Apply Overlay")
+        overlay_btn.clicked.connect(self.apply_overlay)
+        overlay_controls.addWidget(overlay_btn)
+        overlay_controls.addStretch()
+        overlay_layout.addLayout(overlay_controls)
+        layout.addLayout(overlay_layout)
+        
+        # Video trimming (only for videos)
+        trim_layout = QVBoxLayout()
+        trim_layout.addWidget(QLabel("Trim Video (seconds):"))
+        trim_controls = QHBoxLayout()
+        trim_controls.addWidget(QLabel("Start:"))
+        self.trim_start_spin = QSpinBox()
+        self.trim_start_spin.setRange(0, 3600)
+        self.trim_start_spin.setSuffix(" s")
+        trim_controls.addWidget(self.trim_start_spin)
+        trim_controls.addWidget(QLabel("End:"))
+        self.trim_end_spin = QSpinBox()
+        self.trim_end_spin.setRange(0, 3600)
+        self.trim_end_spin.setSuffix(" s")
+        trim_controls.addWidget(self.trim_end_spin)
+        trim_btn = QPushButton("Trim Video")
+        trim_btn.clicked.connect(self.trim_video)
+        trim_controls.addWidget(trim_btn)
+        trim_controls.addStretch()
+        trim_layout.addLayout(trim_controls)
+        layout.addLayout(trim_layout)
+        
+        # Status
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+        
+        # Close button
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        layout.addWidget(close_btn)
+        
+        layout.addStretch()
+    
+    def browse_file(self):
+        """Browse for a media file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select Media File", "",
+            "Media Files (*.mp4 *.avi *.mkv *.jpg *.jpeg *.png);;All Files (*)"
+        )
+        if path:
+            self.file_path_edit.setText(path)
+            self.status_label.setText(f"Selected: {Path(path).name}")
+    
+    def rename_file(self):
+        """Rename the selected file."""
+        file_path = self.file_path_edit.text()
+        new_name = self.new_name_edit.text().strip()
+        
+        if not file_path or not Path(file_path).exists():
+            QMessageBox.warning(self, "Error", "Please select a valid file first.")
+            return
+        
+        if not new_name:
+            QMessageBox.warning(self, "Error", "Please enter a new name.")
+            return
+        
+        try:
+            old_path = Path(file_path)
+            new_path = old_path.parent / f"{new_name}{old_path.suffix}"
+            
+            if new_path.exists():
+                QMessageBox.warning(self, "Error", "A file with that name already exists.")
+                return
+            
+            old_path.rename(new_path)
+            self.file_path_edit.setText(str(new_path))
+            self.status_label.setText(f"Renamed to: {new_path.name}")
+            QMessageBox.information(self, "Success", f"File renamed to {new_path.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to rename file: {e}")
+    
+    def apply_overlay(self):
+        """Apply text overlay to an image."""
+        file_path = self.file_path_edit.text()
+        overlay_text = self.overlay_text_edit.toPlainText().strip()
+        position = self.overlay_position_combo.currentText()
+        
+        if not file_path or not Path(file_path).exists():
+            QMessageBox.warning(self, "Error", "Please select a valid file first.")
+            return
+        
+        if not overlay_text:
+            QMessageBox.warning(self, "Error", "Please enter text to overlay.")
+            return
+        
+        try:
+            path = Path(file_path)
+            
+            # Only works on images
+            if path.suffix.lower() not in ['.jpg', '.jpeg', '.png']:
+                QMessageBox.warning(self, "Error", "Overlay is only supported for image files.")
+                return
+            
+            # Load image as QImage
+            qimg = QImage(str(path))
+            if qimg.isNull():
+                raise ValueError("Failed to load image")
+            
+            # Apply overlay
+            qimg_with_overlay = overlay_text_on_qimage(qimg, overlay_text, position)
+            
+            # Save with a new name
+            output_path = path.parent / f"{path.stem}_overlay{path.suffix}"
+            counter = 1
+            while output_path.exists():
+                output_path = path.parent / f"{path.stem}_overlay_{counter}{path.suffix}"
+                counter += 1
+            
+            if not qimg_with_overlay.save(str(output_path)):
+                raise ValueError("Failed to save image")
+            
+            self.status_label.setText(f"Saved with overlay: {output_path.name}")
+            QMessageBox.information(self, "Success", f"Overlay applied and saved to {output_path.name}")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to apply overlay: {e}")
+    
+    def trim_video(self):
+        """Trim a video file using FFmpeg."""
+        file_path = self.file_path_edit.text()
+        start_time = self.trim_start_spin.value()
+        end_time = self.trim_end_spin.value()
+        
+        if not file_path or not Path(file_path).exists():
+            QMessageBox.warning(self, "Error", "Please select a valid file first.")
+            return
+        
+        if start_time >= end_time:
+            QMessageBox.warning(self, "Error", "Start time must be less than end time.")
+            return
+        
+        try:
+            import subprocess
+            path = Path(file_path)
+            
+            # Only works on videos
+            if path.suffix.lower() not in ['.mp4', '.avi', '.mkv']:
+                QMessageBox.warning(self, "Error", "Trimming is only supported for video files.")
+                return
+            
+            # Create output filename
+            output_path = path.parent / f"{path.stem}_trimmed{path.suffix}"
+            counter = 1
+            while output_path.exists():
+                output_path = path.parent / f"{path.stem}_trimmed_{counter}{path.suffix}"
+                counter += 1
+            
+            # Use FFmpeg to trim
+            duration = end_time - start_time
+            cmd = [
+                'ffmpeg', '-i', str(path),
+                '-ss', str(start_time),
+                '-t', str(duration),
+                '-c', 'copy',
+                str(output_path)
+            ]
+            
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            
+            if result.returncode == 0:
+                self.status_label.setText(f"Trimmed video saved: {output_path.name}")
+                QMessageBox.information(self, "Success", f"Video trimmed and saved to {output_path.name}")
+            else:
+                raise ValueError(f"FFmpeg error: {result.stderr}")
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Error", "FFmpeg is not installed or not in PATH.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to trim video: {e}")
+
+
+# ============================================================================
 # Main Application Window (from main_window.py)
 # ============================================================================
 
@@ -307,9 +751,13 @@ class RtspApp(QWidget):
                 "slug": DEFAULT_CAMERA_SLUG, "channel": "1", "subtype": "0",
                 "transport": DEFAULT_TRANSPORT, "latency": DEFAULT_LATENCY_MS,
                 "running": False, "title": f"Feed {i + 1}",
+                "name_tag": "",  # Optional name tag to replace numeric identifier
+                "overlay_enabled": False,  # Whether to overlay name on video/screenshots
+                "recording": False,  # Whether currently recording
             } for i in range(4)
         ]
         self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
+        self.recorders: List[VideoRecorder] = [VideoRecorder() for _ in range(4)]
         self.active_index: int = 0
 
         # UI Initialization
@@ -317,9 +765,9 @@ class RtspApp(QWidget):
         # Apply the modern, centralized stylesheet
         self._apply_modern_stylesheet()
 
-        # Connect workers to panes
+        # Connect workers to panes and recording
         for i, worker in enumerate(self.workers):
-            worker.frame_ready.connect(self.panes[i].on_frame)
+            worker.frame_ready.connect(self._make_frame_handler(i))
             worker.status.connect(self._make_status_updater(i))
 
         # Fullscreen window (initially hidden)
@@ -525,6 +973,10 @@ class RtspApp(QWidget):
     def _init_ui(self):
         # --- Controls (apply to the currently active panel) ---
         self.title_edit = QLineEdit(self)
+        self.name_tag_edit = QLineEdit(self)
+        self.name_tag_edit.setPlaceholderText("Optional name tag")
+        self.overlay_checkbox = QCheckBox("Overlay name on video/snapshots")
+        
         self.user_edit = QLineEdit(self)
         self.pass_edit = QLineEdit(self)
         self.pass_edit.setEchoMode(QLineEdit.EchoMode.Password)
@@ -548,12 +1000,20 @@ class RtspApp(QWidget):
         self.stop_btn.setObjectName("stop_btn")
         self.snapshot_btn = QPushButton("Snapshot")
         self.fullscreen_btn = QPushButton("Fullscreen")
+        
+        # Recording buttons
+        self.record_btn = QPushButton("Start Recording")
+        self.record_btn.setObjectName("record_btn")
+        self.stop_record_btn = QPushButton("Stop Recording")
+        self.stop_record_btn.setObjectName("stop_record_btn")
+        
         self.start_all_btn = QPushButton("Start All")
         self.start_all_btn.setObjectName("start_all_btn")
         self.stop_all_btn = QPushButton("Stop All")
         self.stop_all_btn.setObjectName("stop_all_btn")
         self.save_cfg_btn = QPushButton("Save Config")
         self.load_cfg_btn = QPushButton("Load Config")
+        self.media_manager_btn = QPushButton("Media Manager")
 
         # --- Status and Preview ---
         self.url_preview = QLineEdit(self)
@@ -588,6 +1048,8 @@ class RtspApp(QWidget):
         form = QFormLayout()
         form.setSpacing(self._form_spacing)
         form.addRow("Title:", self.title_edit)
+        form.addRow("Name Tag:", self.name_tag_edit)
+        form.addRow("", self.overlay_checkbox)
         form.addRow("Username:", self.user_edit)
         form.addRow("Password:", self.pass_edit)
         form.addRow("IP/Host:", self.ip_edit)
@@ -603,8 +1065,18 @@ class RtspApp(QWidget):
         single_stream_actions.setSpacing(self._form_spacing)
         single_stream_actions.addWidget(self.start_btn)
         single_stream_actions.addWidget(self.stop_btn)
-        single_stream_actions.addWidget(self.snapshot_btn)
-        single_stream_actions.addWidget(self.fullscreen_btn)
+        
+        # Row for recording actions
+        recording_actions = QHBoxLayout()
+        recording_actions.setSpacing(self._form_spacing)
+        recording_actions.addWidget(self.record_btn)
+        recording_actions.addWidget(self.stop_record_btn)
+        
+        # Row for view/capture actions
+        view_actions = QHBoxLayout()
+        view_actions.setSpacing(self._form_spacing)
+        view_actions.addWidget(self.snapshot_btn)
+        view_actions.addWidget(self.fullscreen_btn)
 
         # Row for global stream controls
         global_stream_actions = QHBoxLayout()
@@ -619,6 +1091,12 @@ class RtspApp(QWidget):
         config_actions.addWidget(self.save_cfg_btn)
         config_actions.addWidget(self.load_cfg_btn)
         config_actions.addStretch(1) # Push buttons to the left
+        
+        # Row for media management
+        media_actions = QHBoxLayout()
+        media_actions.setSpacing(self._form_spacing)
+        media_actions.addWidget(self.media_manager_btn)
+        media_actions.addStretch(1)
 
         # Assemble the controls in the left-side vertical layout
         controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
@@ -627,12 +1105,15 @@ class RtspApp(QWidget):
         controls_layout.addWidget(QLabel("RTSP URL Preview:"))
         controls_layout.addWidget(self.url_preview)
         controls_layout.addLayout(single_stream_actions)
+        controls_layout.addLayout(recording_actions)
+        controls_layout.addLayout(view_actions)
         controls_layout.addSpacing(max(12, int(self._section_spacing * 1.1))) # Add a visual separator
 
         # Add a title for the global actions section
         controls_layout.addWidget(QLabel("<b>Global Actions</b>"))
         controls_layout.addLayout(global_stream_actions)
         controls_layout.addLayout(config_actions)
+        controls_layout.addLayout(media_actions)
         controls_layout.addStretch(1)
 
         main_layout = QHBoxLayout()
@@ -656,11 +1137,12 @@ class RtspApp(QWidget):
         for p in self.panes:
             p.clicked.connect(self.set_active_panel)
 
-        for w in (self.title_edit, self.user_edit, self.pass_edit, self.ip_edit, self.slug_edit):
+        for w in (self.title_edit, self.name_tag_edit, self.user_edit, self.pass_edit, self.ip_edit, self.slug_edit):
             w.textChanged.connect(self.update_preview)
         for w in (self.port_spin, self.latency_spin):
             w.valueChanged.connect(self.update_preview)
         self.transport_combo.currentIndexChanged.connect(self.update_preview)
+        self.overlay_checkbox.stateChanged.connect(self._handle_overlay_toggle)
 
         for w in (self.channel_combo, self.subtype_combo):
             w.currentIndexChanged.connect(self._handle_stream_parameter_change)
@@ -669,10 +1151,13 @@ class RtspApp(QWidget):
         self.stop_btn.clicked.connect(self.stop_stream)
         self.snapshot_btn.clicked.connect(self.snapshot)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
+        self.record_btn.clicked.connect(self.start_recording)
+        self.stop_record_btn.clicked.connect(self.stop_recording)
         self.start_all_btn.clicked.connect(self.start_all_streams)
         self.stop_all_btn.clicked.connect(self.stop_all_streams)
         self.save_cfg_btn.clicked.connect(self.save_config)
         self.load_cfg_btn.clicked.connect(self.load_config)
+        self.media_manager_btn.clicked.connect(self.open_media_manager)
 
     def build_url_from_state(self, st: Dict[str, Any], include_password: bool = True) -> str:
         user = st.get("user", "")
@@ -698,8 +1183,11 @@ class RtspApp(QWidget):
         self.channel_combo.blockSignals(True)
         self.subtype_combo.blockSignals(True)
         self.transport_combo.blockSignals(True)
+        self.overlay_checkbox.blockSignals(True)
         try:
             self.title_edit.setText(st["title"])
+            self.name_tag_edit.setText(st.get("name_tag", ""))
+            self.overlay_checkbox.setChecked(st.get("overlay_enabled", False))
             self.user_edit.setText(st["user"])
             self.pass_edit.setText(st["pass"])
             self.ip_edit.setText(st["ip"])
@@ -713,12 +1201,15 @@ class RtspApp(QWidget):
             self.channel_combo.blockSignals(False)
             self.subtype_combo.blockSignals(False)
             self.transport_combo.blockSignals(False)
+            self.overlay_checkbox.blockSignals(False)
         self._update_buttons_enabled()
         self.update_preview()
 
     def _sync_state_from_ui(self):
         st = self.panel_states[self.active_index]
         st["title"] = self.title_edit.text()
+        st["name_tag"] = self.name_tag_edit.text()
+        st["overlay_enabled"] = self.overlay_checkbox.isChecked()
         st["user"] = self.user_edit.text()
         st["pass"] = self.pass_edit.text()
         st["ip"] = self.ip_edit.text()
@@ -728,7 +1219,11 @@ class RtspApp(QWidget):
         st["subtype"] = self.subtype_combo.currentText()
         st["transport"] = self.transport_combo.currentText()
         st["latency"] = self.latency_spin.value()
-        self.panes[self.active_index].title.setText(st["title"])
+        
+        # Update pane title with name tag if available
+        name_tag = st.get("name_tag", "").strip()
+        display_name = name_tag if name_tag else st["title"]
+        self.panes[self.active_index].title.setText(display_name)
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         idx = combo.findText(str(value))
@@ -750,6 +1245,10 @@ class RtspApp(QWidget):
         if self.panel_states[self.active_index].get("running", False):
             self.stop_stream()
             self.start_stream()
+    
+    def _handle_overlay_toggle(self, state):
+        """Handle overlay checkbox toggle."""
+        self._sync_state_from_ui()
 
     def set_active_panel(self, index: int):
         if not (0 <= index < 4) or index == self.active_index: return
@@ -786,17 +1285,92 @@ class RtspApp(QWidget):
         if not st["running"]:
             QMessageBox.information(self, "Stream Off", "Cannot take a snapshot, the stream is not running.")
             return
-        default_name = f"{st['title'].replace(' ', '_')}.jpg"
+        
+        # Use name_tag if available, otherwise use title
+        name_tag = st.get("name_tag", "").strip()
+        file_base = name_tag if name_tag else st['title'].replace(' ', '_')
+        default_name = f"{file_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        
         path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", default_name, "Images (*.jpg *.png)")
-        if path and not self.workers[self.active_index].save_snapshot(path):
-            QMessageBox.warning(self, "Snapshot Failed", "Could not save snapshot. No frame received yet?")
+        if path:
+            # Get the current frame and apply overlay if needed
+            worker = self.workers[self.active_index]
+            if worker._last_qimage is None:
+                QMessageBox.warning(self, "Snapshot Failed", "No frame received yet.")
+                return
+            
+            img = worker._last_qimage
+            
+            # Apply overlay if enabled
+            if st.get("overlay_enabled", False) and name_tag:
+                img = overlay_text_on_qimage(img, name_tag, "top-left")
+            
+            if not img.save(path):
+                QMessageBox.warning(self, "Snapshot Failed", "Could not save snapshot.")
+    
+    def start_recording(self):
+        """Start recording the active panel's video."""
+        st = self.panel_states[self.active_index]
+        if not st["running"]:
+            QMessageBox.information(self, "Stream Off", "Cannot record, the stream is not running.")
+            return
+        
+        if st.get("recording", False):
+            QMessageBox.information(self, "Already Recording", "This panel is already recording.")
+            return
+        
+        # Use name_tag if available, otherwise use title
+        name_tag = st.get("name_tag", "").strip()
+        file_base = name_tag if name_tag else st['title'].replace(' ', '_')
+        default_name = f"{file_base}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.mp4"
+        
+        path, _ = QFileDialog.getSaveFileName(self, "Save Recording", default_name, "Video Files (*.mp4)")
+        if path:
+            # Start the recorder
+            recorder = self.recorders[self.active_index]
+            if recorder.start_recording(path, PANE_TARGET_W, PANE_TARGET_H):
+                st["recording"] = True
+                self.panes[self.active_index].set_recording(True)
+                self._update_buttons_enabled()
+                self.status_lbl.setText(f"Recording started: {Path(path).name}")
+            else:
+                QMessageBox.warning(self, "Recording Failed", "Could not start recording.")
+    
+    def stop_recording(self):
+        """Stop recording the active panel's video."""
+        st = self.panel_states[self.active_index]
+        if not st.get("recording", False):
+            QMessageBox.information(self, "Not Recording", "This panel is not currently recording.")
+            return
+        
+        recorder = self.recorders[self.active_index]
+        output_path = recorder.stop_recording()
+        st["recording"] = False
+        self.panes[self.active_index].set_recording(False)
+        self._update_buttons_enabled()
+        
+        if output_path:
+            self.status_lbl.setText(f"Recording saved: {Path(output_path).name}")
+            QMessageBox.information(self, "Recording Saved", f"Recording saved to:\n{output_path}")
+        else:
+            QMessageBox.warning(self, "Recording Failed", "Recording failed or no frames were recorded.")
+    
+    def open_media_manager(self):
+        """Open the media manager dialog."""
+        dialog = MediaManagerDialog(self)
+        dialog.exec()
 
     def _update_buttons_enabled(self):
-        running = self.panel_states[self.active_index]["running"]
+        st = self.panel_states[self.active_index]
+        running = st["running"]
+        recording = st.get("recording", False)
+        
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.snapshot_btn.setEnabled(running)
         self.fullscreen_btn.setEnabled(True)
+        self.record_btn.setEnabled(running and not recording)
+        self.stop_record_btn.setEnabled(recording)
 
     def start_all_streams(self):
         self._sync_state_from_ui()
@@ -832,7 +1406,7 @@ class RtspApp(QWidget):
         self._sync_state_from_ui()
         path, _ = QFileDialog.getSaveFileName(self, "Save Configuration", "", "JSON Files (*.json)")
         if path:
-            data = {"version": 1, "panels": self.panel_states}
+            data = {"version": 2, "panels": self.panel_states}
             try:
                 with open(path, "w") as f: json.dump(data, f, indent=2)
                 self.status_lbl.setText(f"Configuration saved to {path}")
@@ -847,6 +1421,17 @@ class RtspApp(QWidget):
                 loaded_states = data.get("panels", data)
                 if isinstance(loaded_states, list) and len(loaded_states) == 4:
                     self.stop_all_streams()
+                    
+                    # Ensure backward compatibility with old config files
+                    for st in loaded_states:
+                        # Add new fields with defaults if they don't exist
+                        if "name_tag" not in st:
+                            st["name_tag"] = ""
+                        if "overlay_enabled" not in st:
+                            st["overlay_enabled"] = False
+                        if "recording" not in st:
+                            st["recording"] = False
+                    
                     self.panel_states = loaded_states
                     for st in self.panel_states:
                         st['running'] = False
@@ -861,12 +1446,47 @@ class RtspApp(QWidget):
 
     def closeEvent(self, e):
         self.stop_all_streams()
+        # Stop all recordings
+        for i in range(4):
+            if self.recorders[i].is_recording():
+                self.recorders[i].stop_recording()
         super().closeEvent(e)
+
+    def _make_frame_handler(self, index: int):
+        """Create a frame handler that processes frames for display, overlay, and recording."""
+        def handle_frame(qimg: QImage):
+            if qimg.isNull():
+                return
+            
+            st = self.panel_states[index]
+            processed_img = qimg
+            
+            # Apply name tag overlay if enabled
+            if st.get("overlay_enabled", False):
+                name_tag = st.get("name_tag", "").strip()
+                if name_tag:
+                    processed_img = overlay_text_on_qimage(processed_img, name_tag, "top-left")
+            
+            # Send to display
+            self.panes[index].on_frame(processed_img)
+            
+            # Send to fullscreen if active
+            if self._fullscreen_source_index == index and self.fullwin.isVisible():
+                self.fullwin.on_frame(processed_img)
+            
+            # Record frame if recording
+            if st.get("recording", False) and self.recorders[index].is_recording():
+                self.recorders[index].write_frame(processed_img)
+        
+        return handle_frame
 
     def _make_status_updater(self, index: int):
         def update_status(msg: str):
-            pane_title = self.panel_states[index].get('title', f'Feed {index+1}')
-            self.panes[index].title.setText(f"{pane_title}: {msg}")
+            st = self.panel_states[index]
+            # Use name_tag if available, otherwise use title
+            name_tag = st.get('name_tag', '').strip()
+            display_name = name_tag if name_tag else st.get('title', f'Feed {index+1}')
+            self.panes[index].title.setText(f"{display_name}: {msg}")
             if index == self.active_index:
                 self.status_lbl.setText(f"Panel {index+1}: {msg}")
         return update_status
