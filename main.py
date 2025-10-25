@@ -47,12 +47,18 @@ class VideoWorker(QObject):
     frame_ready = pyqtSignal(QImage)
     status = pyqtSignal(str)
     stopped = pyqtSignal()
+    recording_status = pyqtSignal(bool)  # True when recording, False when stopped
 
     def __init__(self):
         super().__init__()
         self._thread: Optional[threading.Thread] = None
         self._stop = threading.Event()
         self._last_qimage: Optional[QImage] = None
+        self._recording = False
+        self._recording_lock = threading.Lock()
+        self._output_container: Optional[Any] = None
+        self._output_stream: Optional[Any] = None
+        self._recording_path: Optional[str] = None
 
     def start(self, url: str, transport: str, latency_ms: int):
         self.stop()
@@ -72,6 +78,36 @@ class VideoWorker(QObject):
         if self._last_qimage is None:
             return False
         return self._last_qimage.save(path)
+    
+    def start_recording(self, path: str) -> bool:
+        """Start recording to MKV file. Returns True if successfully started."""
+        with self._recording_lock:
+            if self._recording:
+                return False
+            self._recording_path = path
+            self._recording = True
+            self.recording_status.emit(True)
+            return True
+    
+    def stop_recording(self):
+        """Stop recording and close the output file."""
+        with self._recording_lock:
+            if not self._recording:
+                return
+            self._recording = False
+            if self._output_container:
+                try:
+                    self._output_container.close()
+                except Exception:
+                    pass
+                self._output_container = None
+                self._output_stream = None
+            self.recording_status.emit(False)
+    
+    def is_recording(self) -> bool:
+        """Check if currently recording."""
+        with self._recording_lock:
+            return self._recording
 
     def _run(self, url: str, transport: str, latency_ms: int):
         opts = {
@@ -100,13 +136,57 @@ class VideoWorker(QObject):
                     for frame in container.decode(stream):
                         if self._stop.is_set():
                             break
-                        # Convert frame to RGB and keep a copy
+                        
+                        # Handle recording if enabled
+                        with self._recording_lock:
+                            if self._recording and self._output_container is None and self._recording_path:
+                                try:
+                                    # Initialize output container for MKV recording
+                                    self._output_container = av.open(self._recording_path, 'w', format='matroska')
+                                    self._output_stream = self._output_container.add_stream('h264', rate=stream.average_rate or 30)
+                                    self._output_stream.width = stream.width
+                                    self._output_stream.height = stream.height
+                                    self._output_stream.pix_fmt = 'yuv420p'
+                                    # Use a reasonable bitrate
+                                    self._output_stream.bit_rate = 2000000
+                                except Exception as e:
+                                    self.status.emit(f"Recording init failed: {e}")
+                                    self._recording = False
+                                    self.recording_status.emit(False)
+                            
+                            # Write frame to output if recording
+                            if self._recording and self._output_container and self._output_stream:
+                                try:
+                                    # Encode and write the frame
+                                    new_frame = av.VideoFrame.from_ndarray(
+                                        frame.to_ndarray(format='rgb24'), 
+                                        format='rgb24'
+                                    )
+                                    new_frame.pts = frame.pts
+                                    new_frame.time_base = frame.time_base
+                                    
+                                    for packet in self._output_stream.encode(new_frame):
+                                        self._output_container.mux(packet)
+                                except Exception as e:
+                                    self.status.emit(f"Recording error: {e}")
+                        
+                        # Convert frame to RGB and keep a copy for display
                         img = frame.to_ndarray(format="rgb24")
                         h, w, _ = img.shape
                         qimg = QImage(img.data, w, h, 3 * w, QImage.Format.Format_RGB888)
                         qimg = qimg.copy()
                         self._last_qimage = qimg
                         self.frame_ready.emit(qimg)
+                
+                # Flush encoder if recording
+                with self._recording_lock:
+                    if self._recording and self._output_stream:
+                        try:
+                            for packet in self._output_stream.encode():
+                                self._output_container.mux(packet)
+                        except Exception:
+                            pass
+                
                 if self._stop.is_set():
                     break
                 self.status.emit("Stream ended, reconnecting in 2s…")
@@ -121,6 +201,9 @@ class VideoWorker(QObject):
                     break
                 self.status.emit(f"Error: {e}; retrying in 2s…")
                 time.sleep(2)
+        
+        # Clean up recording on exit
+        self.stop_recording()
         self.stopped.emit()
 
 
@@ -306,7 +389,7 @@ class RtspApp(QWidget):
                 "user": "", "pass": "", "ip": "", "port": 554,
                 "slug": DEFAULT_CAMERA_SLUG, "channel": "1", "subtype": "0",
                 "transport": DEFAULT_TRANSPORT, "latency": DEFAULT_LATENCY_MS,
-                "running": False, "title": f"Feed {i + 1}",
+                "running": False, "recording": False, "title": f"Feed {i + 1}",
             } for i in range(4)
         ]
         self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
@@ -321,6 +404,7 @@ class RtspApp(QWidget):
         for i, worker in enumerate(self.workers):
             worker.frame_ready.connect(self.panes[i].on_frame)
             worker.status.connect(self._make_status_updater(i))
+            worker.recording_status.connect(self._make_recording_status_updater(i))
 
         # Fullscreen window (initially hidden)
         self.fullwin = FullscreenVideo()
@@ -455,6 +539,15 @@ class RtspApp(QWidget):
                 background-color: #f28b82; /* Google red for stop hover */
                 color: #202124;
             }}
+            
+            /* RECORDING BUTTON - RED WHEN ACTIVE */
+            QPushButton#record_btn[recording="true"] {{
+                background-color: #ea4335; /* Google red for recording */
+                color: #ffffff;
+            }}
+            QPushButton#record_btn[recording="true"]:hover {{
+                background-color: #f28b82;
+            }}
 
             /* VIDEO PANE STYLING */
             VideoPane {{
@@ -547,6 +640,8 @@ class RtspApp(QWidget):
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setObjectName("stop_btn")
         self.snapshot_btn = QPushButton("Snapshot")
+        self.record_btn = QPushButton("Record")
+        self.record_btn.setObjectName("record_btn")
         self.fullscreen_btn = QPushButton("Fullscreen")
         self.start_all_btn = QPushButton("Start All")
         self.start_all_btn.setObjectName("start_all_btn")
@@ -604,6 +699,7 @@ class RtspApp(QWidget):
         single_stream_actions.addWidget(self.start_btn)
         single_stream_actions.addWidget(self.stop_btn)
         single_stream_actions.addWidget(self.snapshot_btn)
+        single_stream_actions.addWidget(self.record_btn)
         single_stream_actions.addWidget(self.fullscreen_btn)
 
         # Row for global stream controls
@@ -668,6 +764,7 @@ class RtspApp(QWidget):
         self.start_btn.clicked.connect(self.start_stream)
         self.stop_btn.clicked.connect(self.stop_stream)
         self.snapshot_btn.clicked.connect(self.snapshot)
+        self.record_btn.clicked.connect(self.toggle_recording)
         self.fullscreen_btn.clicked.connect(self.toggle_fullscreen)
         self.start_all_btn.clicked.connect(self.start_all_streams)
         self.stop_all_btn.clicked.connect(self.stop_all_streams)
@@ -777,7 +874,12 @@ class RtspApp(QWidget):
         self._update_buttons_enabled()
 
     def stop_stream(self):
-        self.workers[self.active_index].stop()
+        worker = self.workers[self.active_index]
+        # Stop recording if active
+        if self.panel_states[self.active_index].get("recording", False):
+            worker.stop_recording()
+            self.panel_states[self.active_index]["recording"] = False
+        worker.stop()
         self.panel_states[self.active_index]["running"] = False
         self._update_buttons_enabled()
 
@@ -790,12 +892,54 @@ class RtspApp(QWidget):
         path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", default_name, "Images (*.jpg *.png)")
         if path and not self.workers[self.active_index].save_snapshot(path):
             QMessageBox.warning(self, "Snapshot Failed", "Could not save snapshot. No frame received yet?")
+    
+    def toggle_recording(self):
+        """Toggle recording for the active panel."""
+        st = self.panel_states[self.active_index]
+        worker = self.workers[self.active_index]
+        
+        if not st["running"]:
+            QMessageBox.information(self, "Stream Off", "Cannot record, the stream is not running.")
+            return
+        
+        if st.get("recording", False):
+            # Stop recording
+            worker.stop_recording()
+            st["recording"] = False
+            self._update_buttons_enabled()
+        else:
+            # Start recording
+            default_name = f"{st['title'].replace(' ', '_')}.mkv"
+            path, _ = QFileDialog.getSaveFileName(
+                self, "Save Recording", default_name, "Video Files (*.mkv)"
+            )
+            if path:
+                if worker.start_recording(path):
+                    st["recording"] = True
+                    self._update_buttons_enabled()
+                else:
+                    QMessageBox.warning(self, "Recording Failed", "Could not start recording.")
+    
+    def _make_recording_status_updater(self, index: int):
+        """Create a callback to update recording status for a specific panel."""
+        def update_recording_status(is_recording: bool):
+            self.panel_states[index]["recording"] = is_recording
+            if index == self.active_index:
+                self._update_buttons_enabled()
+        return update_recording_status
 
     def _update_buttons_enabled(self):
         running = self.panel_states[self.active_index]["running"]
+        recording = self.panel_states[self.active_index].get("recording", False)
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
         self.snapshot_btn.setEnabled(running)
+        self.record_btn.setEnabled(running)
+        self.record_btn.setText("Stop Recording" if recording else "Record")
+        self.record_btn.setProperty("recording", recording)
+        # Re-polish the button to force a style update
+        self.record_btn.style().unpolish(self.record_btn)
+        self.record_btn.style().polish(self.record_btn)
         self.fullscreen_btn.setEnabled(True)
 
     def start_all_streams(self):
@@ -810,6 +954,10 @@ class RtspApp(QWidget):
     def stop_all_streams(self):
         for i in range(4):
             if self.panel_states[i]["running"]:
+                # Stop recording if active
+                if self.panel_states[i].get("recording", False):
+                    self.workers[i].stop_recording()
+                    self.panel_states[i]["recording"] = False
                 self.workers[i].stop()
                 self.panel_states[i]["running"] = False
         self._update_buttons_enabled()
