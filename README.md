@@ -42,7 +42,7 @@ This application uses:
 * [NumPy](https://numpy.org/)
 * [Pillow](https://python-pillow.org/) (for text overlays)
 
-Make sure FFmpeg is installed on your system — PyAV depends on it and it's also required for video trimming:
+Make sure FFmpeg is installed on your system — PyAV depends on it and is also required for video trimming:
 
 ```bash
 # Example for Debian/Ubuntu
