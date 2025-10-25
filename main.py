@@ -4,6 +4,8 @@ import sys
 import json
 import threading
 import time
+import os
+from datetime import datetime
 from typing import Optional, List, Dict, Any, Tuple
 
 import av
@@ -400,6 +402,7 @@ class RtspApp(QWidget):
                 "slug": DEFAULT_CAMERA_SLUG, "channel": "1", "subtype": "0",
                 "transport": DEFAULT_TRANSPORT, "latency": DEFAULT_LATENCY_MS,
                 "running": False, "recording": False, "title": f"Feed {i + 1}",
+                "snapshot_dir": "", "recording_dir": "",
             } for i in range(4)
         ]
         self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
@@ -523,6 +526,7 @@ class RtspApp(QWidget):
                 padding: {button_pad_v}px {button_pad_h}px;
                 font-size: {controls_label_font}pt;
                 font-weight: bold;
+                min-width: {max(40, int(50 * self._scale))}px;
             }}
             QPushButton:hover {{
                 background-color: #70757a;
@@ -643,6 +647,17 @@ class RtspApp(QWidget):
         self.latency_spin = QSpinBox(self)
         self.latency_spin.setRange(0, 5000)
         self.latency_spin.setSuffix(" ms")
+        
+        # --- Settings for Snapshot and Recording Directories ---
+        self.snapshot_dir_edit = QLineEdit(self)
+        self.snapshot_dir_edit.setPlaceholderText("Leave blank for prompt")
+        self.snapshot_dir_btn = QPushButton("Browse...")
+        self.snapshot_dir_btn.setMaximumWidth(max(60, int(80 * self._scale)))
+        
+        self.recording_dir_edit = QLineEdit(self)
+        self.recording_dir_edit.setPlaceholderText("Leave blank for prompt")
+        self.recording_dir_btn = QPushButton("Browse...")
+        self.recording_dir_btn.setMaximumWidth(max(60, int(80 * self._scale)))
 
         # --- Action Buttons ---
         self.start_btn = QPushButton("Start")
@@ -702,6 +717,20 @@ class RtspApp(QWidget):
         form.addRow("Subtype:", self.subtype_combo)
         form.addRow("Transport:", self.transport_combo)
         form.addRow("Latency:", self.latency_spin)
+        
+        # Create horizontal layout for snapshot directory with browse button
+        snapshot_dir_layout = QHBoxLayout()
+        snapshot_dir_layout.setSpacing(self._form_spacing)
+        snapshot_dir_layout.addWidget(self.snapshot_dir_edit, 1)
+        snapshot_dir_layout.addWidget(self.snapshot_dir_btn)
+        form.addRow("Snapshot Dir:", snapshot_dir_layout)
+        
+        # Create horizontal layout for recording directory with browse button
+        recording_dir_layout = QHBoxLayout()
+        recording_dir_layout.setSpacing(self._form_spacing)
+        recording_dir_layout.addWidget(self.recording_dir_edit, 1)
+        recording_dir_layout.addWidget(self.recording_dir_btn)
+        form.addRow("Recording Dir:", recording_dir_layout)
 
         # Button row for individual stream actions
         single_stream_actions = QHBoxLayout()
@@ -780,6 +809,14 @@ class RtspApp(QWidget):
         self.stop_all_btn.clicked.connect(self.stop_all_streams)
         self.save_cfg_btn.clicked.connect(self.save_config)
         self.load_cfg_btn.clicked.connect(self.load_config)
+        
+        # Connect directory browse buttons
+        self.snapshot_dir_btn.clicked.connect(self.browse_snapshot_dir)
+        self.recording_dir_btn.clicked.connect(self.browse_recording_dir)
+        
+        # Connect text change events to save state
+        self.snapshot_dir_edit.textChanged.connect(self._sync_state_from_ui)
+        self.recording_dir_edit.textChanged.connect(self._sync_state_from_ui)
 
     def build_url_from_state(self, st: Dict[str, Any], include_password: bool = True) -> str:
         user = st.get("user", "")
@@ -805,6 +842,8 @@ class RtspApp(QWidget):
         self.channel_combo.blockSignals(True)
         self.subtype_combo.blockSignals(True)
         self.transport_combo.blockSignals(True)
+        self.snapshot_dir_edit.blockSignals(True)
+        self.recording_dir_edit.blockSignals(True)
         try:
             self.title_edit.setText(st["title"])
             self.user_edit.setText(st["user"])
@@ -816,10 +855,14 @@ class RtspApp(QWidget):
             self._set_combo_value(self.subtype_combo, st["subtype"])
             self._set_combo_value(self.transport_combo, st["transport"])
             self.latency_spin.setValue(st["latency"])
+            self.snapshot_dir_edit.setText(st.get("snapshot_dir", ""))
+            self.recording_dir_edit.setText(st.get("recording_dir", ""))
         finally:
             self.channel_combo.blockSignals(False)
             self.subtype_combo.blockSignals(False)
             self.transport_combo.blockSignals(False)
+            self.snapshot_dir_edit.blockSignals(False)
+            self.recording_dir_edit.blockSignals(False)
         self._update_buttons_enabled()
         self.update_preview()
 
@@ -835,6 +878,8 @@ class RtspApp(QWidget):
         st["subtype"] = self.subtype_combo.currentText()
         st["transport"] = self.transport_combo.currentText()
         st["latency"] = self.latency_spin.value()
+        st["snapshot_dir"] = self.snapshot_dir_edit.text()
+        st["recording_dir"] = self.recording_dir_edit.text()
         self.panes[self.active_index].title.setText(st["title"])
 
     def _set_combo_value(self, combo: QComboBox, value: str):
@@ -898,10 +943,25 @@ class RtspApp(QWidget):
         if not st["running"]:
             QMessageBox.information(self, "Stream Off", "Cannot take a snapshot, the stream is not running.")
             return
-        default_name = f"{st['title'].replace(' ', '_')}.jpg"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", default_name, "Images (*.jpg *.png)")
+        
+        # Get snapshot directory, prompt if not set
+        snapshot_dir = st.get("snapshot_dir", "").strip()
+        if not snapshot_dir:
+            default_name = f"{st['title'].replace(' ', '_')}.jpg"
+            path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", default_name, "Images (*.jpg *.png)")
+        else:
+            # Auto-generate filename with timestamp
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            filename = f"{st['title'].replace(' ', '_')}_{timestamp}.jpg"
+            path = os.path.join(snapshot_dir, filename)
+            
+            # Create directory if it doesn't exist
+            os.makedirs(snapshot_dir, exist_ok=True)
+        
         if path and not self.workers[self.active_index].save_snapshot(path):
             QMessageBox.warning(self, "Snapshot Failed", "Could not save snapshot. No frame received yet?")
+        elif path:
+            self.status_lbl.setText(f"Snapshot saved: {os.path.basename(path)}")
     
     def toggle_recording(self):
         """Toggle recording for the active panel."""
@@ -917,18 +977,47 @@ class RtspApp(QWidget):
             worker.stop_recording()
             st["recording"] = False
             self._update_buttons_enabled()
+            self.status_lbl.setText("Recording stopped")
         else:
-            # Start recording
-            default_name = f"{st['title'].replace(' ', '_')}.mkv"
-            path, _ = QFileDialog.getSaveFileName(
-                self, "Save Recording", default_name, "Video Files (*.mkv)"
-            )
+            # Get recording directory, prompt if not set
+            recording_dir = st.get("recording_dir", "").strip()
+            if not recording_dir:
+                default_name = f"{st['title'].replace(' ', '_')}.mkv"
+                path, _ = QFileDialog.getSaveFileName(
+                    self, "Save Recording", default_name, "Video Files (*.mkv)"
+                )
+            else:
+                # Auto-generate filename with timestamp
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                filename = f"{st['title'].replace(' ', '_')}_{timestamp}.mkv"
+                path = os.path.join(recording_dir, filename)
+                
+                # Create directory if it doesn't exist
+                os.makedirs(recording_dir, exist_ok=True)
+            
             if path:
                 if worker.start_recording(path):
                     st["recording"] = True
                     self._update_buttons_enabled()
+                    self.status_lbl.setText(f"Recording to: {os.path.basename(path)}")
                 else:
                     QMessageBox.warning(self, "Recording Failed", "Could not start recording.")
+    
+    def browse_snapshot_dir(self):
+        """Browse for a snapshot directory."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Snapshot Directory", self.snapshot_dir_edit.text()
+        )
+        if directory:
+            self.snapshot_dir_edit.setText(directory)
+    
+    def browse_recording_dir(self):
+        """Browse for a recording directory."""
+        directory = QFileDialog.getExistingDirectory(
+            self, "Select Recording Directory", self.recording_dir_edit.text()
+        )
+        if directory:
+            self.recording_dir_edit.setText(directory)
     
     def _make_recording_status_updater(self, index: int):
         """Create a callback to update recording status for a specific panel."""
