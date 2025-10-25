@@ -59,6 +59,8 @@ class VideoWorker(QObject):
         self._output_container: Optional[Any] = None
         self._output_stream: Optional[Any] = None
         self._recording_path: Optional[str] = None
+        self._frame_count = 0
+        self._recording_start_pts: Optional[int] = None
 
     def start(self, url: str, transport: str, latency_ms: int):
         self.stop()
@@ -149,6 +151,7 @@ class VideoWorker(QObject):
                                     self._output_stream.pix_fmt = 'yuv420p'
                                     # Use a reasonable bitrate
                                     self._output_stream.bit_rate = 2000000
+                                    self._recording_start_pts = frame.pts
                                     self._frame_count = 0
                                 except Exception as e:
                                     self.status.emit(f"Recording init failed: {e}")
@@ -163,8 +166,13 @@ class VideoWorker(QObject):
                                         frame.to_ndarray(format='rgb24'), 
                                         format='rgb24'
                                     )
-                                    # Set pts for proper timing
-                                    new_frame.pts = self._frame_count
+                                    # Use the original frame's PTS relative to recording start
+                                    # This preserves the original timing
+                                    if frame.pts is not None and self._recording_start_pts is not None:
+                                        new_frame.pts = frame.pts - self._recording_start_pts
+                                    else:
+                                        # Fallback to frame counter if PTS not available
+                                        new_frame.pts = self._frame_count
                                     self._frame_count += 1
                                     
                                     for packet in self._output_stream.encode(new_frame):
