@@ -22,6 +22,7 @@ Supports per-panel configuration, fullscreen viewing, snapshots, recordings, and
   * All panel connection settings
   * Window geometry
   * Running states (with optional auto-restart on load)
+* **Copy panel settings** so you can reuse credentials and URLs across camera slots quickly.
 * **Reconnect on error** with automatic retries.
 * **Minimal, responsive UI** using PyQt6.
 
@@ -107,6 +108,7 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 | **Stop All**            | Stop all streams                                            |
 | **Save Config…**        | Save all panel settings + UI state                          |
 | **Load Config…**        | Load panel settings + optionally auto-start running streams |
+| **Copy to Active**      | Copy credentials, host info, and other fields from the selected panel into the active slot |
 | **Previous / Next Page**| Navigate between camera pages when more panes exist         |
 | **Settings**            | Open the settings panel (grid presets, background streaming, default paths) |
 
@@ -117,7 +119,7 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 The **Settings** dialog appears at the bottom left of the controls column. It exposes:
 
 * **Grid preset** — choose 1×1, 2×2, 3×3, or 4×4 layouts. Larger layouts automatically add pages so you can manage all sixteen feeds.
-* **Background streaming** — keep inactive pages running (off by default so streams pause when you leave the page).
+* **Background streaming** — keep inactive pages running (off by default so streams pause when you leave the page). When enabled, streams only stay active if they were already running; switching pages will not auto-start stopped feeds.
 * **Snapshot & recording directories** — define default folders for quick saving.
 * **Filename patterns** — generate default filenames using placeholders:
   * `{title}`, `{index}`, `{channel}`, `{timestamp}`, or `$(date)` (alias for the timestamp).
@@ -190,6 +192,7 @@ rtsp-client/
 * Added a settings panel with grid presets (1×1 through 4×4), pagination controls, and a background streaming toggle.
 * Added configurable snapshot and recording save directories with pattern-based default filenames.
 * Extended the viewer to manage up to sixteen camera feeds through multi-page navigation.
+* Added a per-panel copy helper and refined background streaming so switching pages never auto-starts inactive feeds.
 
 ---
 

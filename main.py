@@ -509,6 +509,7 @@ class RtspApp(QWidget):
             worker.frame_ready.connect(self.panes[i].on_frame)
             worker.status.connect(self._make_status_updater(i))
             worker.recording_status.connect(self._make_recording_status_updater(i))
+            worker.stopped.connect(self._make_worker_stopped_handler(i))
 
         # Fullscreen window (initially hidden)
         self.fullwin = FullscreenVideo()
@@ -548,6 +549,7 @@ class RtspApp(QWidget):
             "running": False,
             "recording": False,
             "resume_on_return": False,
+            "paused_for_page": False,
             "title": f"Feed {index + 1}",
         }
 
@@ -866,6 +868,16 @@ class RtspApp(QWidget):
         config_actions.addWidget(self.load_cfg_btn)
         config_actions.addStretch(1) # Push buttons to the left
 
+        copy_controls_layout = QHBoxLayout()
+        copy_controls_layout.setSpacing(self._form_spacing)
+        self.copy_source_combo = self._build_combo([
+            f"Panel {i + 1}" for i in range(self.max_channels)
+        ])
+        copy_controls_layout.addWidget(self.copy_source_combo, 1)
+        self.copy_btn = QPushButton("Copy to Active")
+        self.copy_btn.setObjectName("copy_btn")
+        copy_controls_layout.addWidget(self.copy_btn)
+
         # Assemble the controls in the left-side vertical layout
         controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
         controls_layout.addLayout(form)
@@ -879,6 +891,8 @@ class RtspApp(QWidget):
         controls_layout.addWidget(QLabel("<b>Global Actions</b>"))
         controls_layout.addLayout(global_stream_actions)
         controls_layout.addLayout(config_actions)
+        controls_layout.addWidget(QLabel("<b>Copy Panel Settings</b>"))
+        controls_layout.addLayout(copy_controls_layout)
         controls_layout.addStretch(1)
 
         self.page_controls_widget = QWidget()
@@ -940,8 +954,12 @@ class RtspApp(QWidget):
         self.next_page_btn.clicked.connect(self._next_page)
         self.page_combo.currentIndexChanged.connect(self._page_combo_changed)
         self.settings_btn.clicked.connect(self.open_settings_dialog)
+        self.copy_btn.clicked.connect(self._copy_selected_panel_settings)
+        self.copy_source_combo.currentIndexChanged.connect(self._update_copy_controls)
 
         self._update_page_controls()
+        self._refresh_copy_source_labels()
+        self._update_copy_controls()
 
     def _refresh_grid_layout(self) -> None:
         """Rebuild the grid widget for the current page and grid preset."""
@@ -1004,6 +1022,23 @@ class RtspApp(QWidget):
         self.next_page_btn.setEnabled(show_controls and self.current_page < total_pages - 1)
         self.page_combo.setEnabled(show_controls)
 
+    def _refresh_copy_source_labels(self) -> None:
+        """Keep the copy-source combo box labels aligned with panel titles."""
+
+        if not hasattr(self, "copy_source_combo"):
+            return
+        for i in range(self.max_channels):
+            label = self.panel_states[i].get("title", f"Feed {i + 1}")
+            self.copy_source_combo.setItemText(i, f"{i + 1}: {label}")
+
+    def _update_copy_controls(self) -> None:
+        """Enable or disable copy controls based on the active panel."""
+
+        if not hasattr(self, "copy_btn"):
+            return
+        enable = self.copy_source_combo.currentIndex() != self.active_index
+        self.copy_btn.setEnabled(enable)
+
     def _previous_page(self) -> None:
         """Navigate to the previous page of camera panes."""
 
@@ -1055,6 +1090,7 @@ class RtspApp(QWidget):
             state = self.panel_states[idx]
             resume = state.get("running", False)
             state["resume_on_return"] = resume
+            state["paused_for_page"] = resume
             if state.get("recording", False):
                 self.workers[idx].stop_recording()
                 state["recording"] = False
@@ -1064,11 +1100,61 @@ class RtspApp(QWidget):
 
         for idx in target_indexes:
             state = self.panel_states[idx]
-            if state.pop("resume_on_return", False) and state.get("ip"):
+            should_resume = state.get("resume_on_return", False) and state.get("paused_for_page", False)
+            state["resume_on_return"] = False
+            if should_resume and state.get("ip"):
                 url = self.build_url_from_state(state)
                 if url:
                     self.workers[idx].start(url, state["transport"], state["latency"])
                     state["running"] = True
+            state["paused_for_page"] = False
+
+    def _copy_selected_panel_settings(self) -> None:
+        """Copy camera credentials and connection fields into the active panel."""
+
+        if not hasattr(self, "copy_source_combo"):
+            return
+        source_index = self.copy_source_combo.currentIndex()
+        dest_index = self.active_index
+        if source_index == dest_index:
+            return
+
+        self._sync_state_from_ui()
+
+        source_state = self.panel_states[source_index]
+        dest_state = self.panel_states[dest_index]
+
+        if dest_state.get("running", False):
+            self.stop_stream()
+        if dest_state.get("recording", False):
+            self.workers[dest_index].stop_recording()
+            dest_state["recording"] = False
+        dest_state["running"] = False
+        dest_state["recording"] = False
+        dest_state["resume_on_return"] = False
+        dest_state["paused_for_page"] = False
+
+        fields_to_copy = [
+            "title",
+            "user",
+            "pass",
+            "ip",
+            "port",
+            "slug",
+            "channel",
+            "subtype",
+            "transport",
+            "latency",
+        ]
+        for key in fields_to_copy:
+            dest_state[key] = source_state.get(key, dest_state.get(key))
+
+        self.panes[dest_index].title.setText(dest_state["title"])
+        self._refresh_copy_source_labels()
+        self._sync_ui_from_state()
+        self.status_lbl.setText(
+            f"Copied settings from Panel {source_index + 1} to Panel {dest_index + 1}"
+        )
 
     def _resolve_base_directory(self, configured_path: str, fallback: Path) -> Path:
         """Expand and return a directory path, falling back if empty."""
@@ -1119,10 +1205,12 @@ class RtspApp(QWidget):
                 state["recording"] = False
             if state.get("running", False):
                 state["resume_on_return"] = True
+                state["paused_for_page"] = True
                 self.workers[idx].stop()
                 state["running"] = False
             else:
                 state["resume_on_return"] = False
+                state["paused_for_page"] = False
 
     def open_settings_dialog(self) -> None:
         """Display the settings dialog and apply changes when accepted."""
@@ -1152,6 +1240,7 @@ class RtspApp(QWidget):
         elif not previous_keep and self.app_settings.get("keep_streams_active", False):
             for state in self.panel_states:
                 state["resume_on_return"] = False
+                state["paused_for_page"] = False
 
         self._update_page_controls()
         self._sync_ui_from_state()
@@ -1198,6 +1287,7 @@ class RtspApp(QWidget):
             self.transport_combo.blockSignals(False)
         self._update_buttons_enabled()
         self.update_preview()
+        self._update_copy_controls()
 
     def _sync_state_from_ui(self):
         st = self.panel_states[self.active_index]
@@ -1212,6 +1302,7 @@ class RtspApp(QWidget):
         st["transport"] = self.transport_combo.currentText()
         st["latency"] = self.latency_spin.value()
         self.panes[self.active_index].title.setText(st["title"])
+        self._refresh_copy_source_labels()
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         idx = combo.findText(str(value))
@@ -1264,6 +1355,7 @@ class RtspApp(QWidget):
         worker.start(url, st["transport"], st["latency"])
         st["running"] = True
         st["resume_on_return"] = False
+        st["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def stop_stream(self):
@@ -1275,6 +1367,7 @@ class RtspApp(QWidget):
         worker.stop()
         self.panel_states[self.active_index]["running"] = False
         self.panel_states[self.active_index]["resume_on_return"] = False
+        self.panel_states[self.active_index]["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def snapshot(self):
@@ -1350,6 +1443,21 @@ class RtspApp(QWidget):
                 self._update_buttons_enabled()
         return update_recording_status
 
+    def _make_worker_stopped_handler(self, index: int):
+        """Ensure panel state reflects when a worker stops streaming."""
+
+        def handle_worker_stopped() -> None:
+            state = self.panel_states[index]
+            state["running"] = False
+            if not state.get("resume_on_return", False):
+                state["paused_for_page"] = False
+            if state.get("recording", False):
+                state["recording"] = False
+            if index == self.active_index:
+                self._update_buttons_enabled()
+
+        return handle_worker_stopped
+
     def _update_buttons_enabled(self):
         running = self.panel_states[self.active_index]["running"]
         recording = self.panel_states[self.active_index].get("recording", False)
@@ -1372,6 +1480,7 @@ class RtspApp(QWidget):
                 self.workers[i].start(url, st["transport"], st["latency"])
                 st["running"] = True
                 st["resume_on_return"] = False
+                st["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def stop_all_streams(self):
@@ -1384,6 +1493,7 @@ class RtspApp(QWidget):
                 self.workers[i].stop()
                 self.panel_states[i]["running"] = False
                 self.panel_states[i]["resume_on_return"] = False
+                self.panel_states[i]["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def toggle_fullscreen(self):
@@ -1408,6 +1518,7 @@ class RtspApp(QWidget):
             for i in range(self.max_channels):
                 state_copy = dict(self.panel_states[i])
                 state_copy.pop("resume_on_return", None)
+                state_copy.pop("paused_for_page", None)
                 panels.append(state_copy)
             data = {
                 "version": 2,
@@ -1415,7 +1526,8 @@ class RtspApp(QWidget):
                 "settings": dict(self.app_settings),
             }
             try:
-                with open(path, "w") as f: json.dump(data, f, indent=2)
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
                 self.status_lbl.setText(f"Configuration saved to {path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error Saving", f"Could not save config file:\n{e}")
@@ -1450,6 +1562,7 @@ class RtspApp(QWidget):
                     self._refresh_grid_layout()
                     self._update_page_controls()
                     self._sync_ui_from_state()
+                    self._refresh_copy_source_labels()
                     self._enforce_background_stream_setting()
                     self.status_lbl.setText(f"Configuration loaded from {path}")
                 else:
