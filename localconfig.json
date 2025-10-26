@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "panels": [
+    {
+      "user": "user",
+      "pass": "password",
+      "ip": "127.0.0.1",
+      "port": 8554,
+      "slug": "/teststream",
+      "channel": "3",
+      "subtype": "0",
+      "transport": "tcp",
+      "latency": 100,
+      "running": true,
+      "title": "Feed 1"
+    },
+    {
+      "user": "user",
+      "pass": "password",
+      "ip": "127.0.0.1",
+      "port": 8554,
+      "slug": "/teststream",
+      "channel": "8",
+      "subtype": "0",
+      "transport": "tcp",
+      "latency": 100,
+      "running": true,
+      "title": "Feed 2"
+    },
+    {
+      "user": "user",
+      "pass": "password",
+      "ip": "127.0.0.1",
+      "port": 8554,
+      "slug": "/teststream",
+      "channel": "6",
+      "subtype": "0",
+      "transport": "tcp",
+      "latency": 100,
+      "running": true,
+      "title": "Feed 3"
+    },
+    {
+      "user": "user",
+      "pass": "password",
+      "ip": "127.0.0.1",
+      "port": 8554,
+      "slug": "/teststream",
+      "channel": "10",
+      "subtype": "0",
+      "transport": "tcp",
+      "latency": 100,
+      "running": true,
+      "title": "Feed 4"
+    }
+  ]
+}
