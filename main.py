@@ -254,9 +254,14 @@ class VideoPane(QFrame):
         self.video_lbl.setObjectName("video_lbl")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_lbl.setText("No video")
-        self.video_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
-        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        video_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        video_policy.setHeightForWidth(True)
+        self.video_lbl.setSizePolicy(video_policy)
+
+        pane_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        pane_policy.setHeightForWidth(True)
+        self.setSizePolicy(pane_policy)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -268,10 +273,29 @@ class VideoPane(QFrame):
         wrap.addWidget(self.video_lbl, 1)
         v.addLayout(wrap, 1)
 
+    def hasHeightForWidth(self) -> bool:
+        """Indicate that pane height should be derived from the allotted width."""
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        """Compute a height that preserves the pane's target aspect ratio."""
+        if self._target_size.width() <= 0:
+            return super().heightForWidth(width)
+        title_h = self.title.sizeHint().height()
+        ratio = self._target_size.height() / max(1, self._target_size.width())
+        return int(width * ratio + title_h)
+
     def sizeHint(self) -> QSize:
         # Manually calculate hint based on layout to be safe
         title_h = self.title.sizeHint().height()
         return QSize(self._target_size.width(), self._target_size.height() + title_h)
+
+    def minimumSizeHint(self) -> QSize:
+        """Provide a flexible minimum size that still respects the aspect ratio."""
+        title_h = self.title.sizeHint().height()
+        base_width = max(120, int(self._target_size.width() * 0.25))
+        ratio = self._target_size.height() / max(1, self._target_size.width())
+        return QSize(base_width, int(base_width * ratio + title_h))
 
     def set_active(self, active: bool):
         """
@@ -814,6 +838,9 @@ class RtspApp(QWidget):
             for i in range(self.max_channels)
         ]
         self.grid_widget = QWidget()
+        grid_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        grid_policy.setHeightForWidth(True)
+        self.grid_widget.setSizePolicy(grid_policy)
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setSpacing(self._grid_spacing)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
@@ -993,6 +1020,7 @@ class RtspApp(QWidget):
             row = offset // cols
             col = offset % cols
             self.grid_layout.addWidget(pane, row, col)
+            pane.updateGeometry()
             pane.show()
 
         for r in range(rows):
