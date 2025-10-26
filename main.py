@@ -255,7 +255,8 @@ class VideoPane(QFrame):
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_lbl.setText("No video")
         self.video_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video_lbl.setMinimumSize(self._target_size)
+
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -816,6 +817,8 @@ class RtspApp(QWidget):
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setSpacing(self._grid_spacing)
         self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self._grid_row_count = 0
+        self._grid_col_count = 0
         self._refresh_grid_layout()
 
         # --- Layout Section ---
@@ -966,6 +969,10 @@ class RtspApp(QWidget):
 
         if not hasattr(self, "grid_layout"):
             return
+        for r in range(self._grid_row_count):
+            self.grid_layout.setRowStretch(r, 0)
+        for c in range(self._grid_col_count):
+            self.grid_layout.setColumnStretch(c, 0)
         while self.grid_layout.count():
             item = self.grid_layout.takeAt(0)
             widget = item.widget()
@@ -987,6 +994,13 @@ class RtspApp(QWidget):
             col = offset % cols
             self.grid_layout.addWidget(pane, row, col)
             pane.show()
+
+        for r in range(rows):
+            self.grid_layout.setRowStretch(r, 1)
+        for c in range(cols):
+            self.grid_layout.setColumnStretch(c, 1)
+        self._grid_row_count = rows
+        self._grid_col_count = cols
 
         self.grid_widget.updateGeometry()
         self._update_active_styles()
@@ -1135,7 +1149,6 @@ class RtspApp(QWidget):
         dest_state["paused_for_page"] = False
 
         fields_to_copy = [
-            "title",
             "user",
             "pass",
             "ip",
