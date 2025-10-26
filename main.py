@@ -477,10 +477,6 @@ class RtspApp(QWidget):
         self._layout_margin = max(12, int(20 * self._scale))
         self._footer_height = max(40, int(52 * self._scale))
 
-        init_w, init_h = self._initial_window_dimensions()
-        self.resize(init_w, init_h)
-        self.setMinimumSize(int(init_w * 0.85), int(init_h * 0.85))
-
         self.max_channels = 16
         self.grid_presets: Dict[str, Tuple[int, int]] = {
             "1x1": (1, 1),
@@ -489,6 +485,10 @@ class RtspApp(QWidget):
             "4x4": (4, 4),
         }
         self.app_settings: Dict[str, Any] = self._default_settings()
+
+        init_w, init_h = self._initial_window_dimensions()
+        self.resize(init_w, init_h)
+        self.setMinimumSize(int(init_w * 0.85), int(init_h * 0.85))
 
         # Per-panel state
         self.panel_states: List[Dict[str, Any]] = [
