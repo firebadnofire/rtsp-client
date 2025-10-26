@@ -1,19 +1,22 @@
-# RTSP Viewer — 4-Panel Fixed Resolution
+# RTSP Viewer — Configurable Grid RTSP Client
 
-A PyQt6 + PyAV-based desktop application for viewing and managing up to **four simultaneous RTSP camera feeds** in a fixed-resolution 2×2 grid layout.
-Supports per-panel configuration, fullscreen viewing, snapshots, and persistent config saving/loading.
+A PyQt6 + PyAV-based desktop application for viewing and managing up to **sixteen simultaneous RTSP camera feeds**.
+The viewer defaults to a fixed-resolution 2×2 grid, and the new Settings panel lets you switch to 1×1, 3×3, or 4×4 layouts with automatic pagination for additional cameras.
+Supports per-panel configuration, fullscreen viewing, snapshots, recordings, and persistent config saving/loading.
 
 ---
 
 ## Features
 
-* **Four camera feeds** in a fixed 960×540 panel layout (fits neatly into a 1920×1080 grid).
+* **Configurable grid presets** (1×1, 2×2, 3×3, 4×4) with pagination to cover up to 16 feeds.
 * **Start/Stop per panel** or **start/stop all at once**.
 * **Live RTSP URL preview** as you edit connection settings.
 * **TCP/UDP transport selection** with configurable latency.
 * **Snapshot capture** to PNG/JPEG.
 * **Live recording** to crash-safe MKV format - record any camera feed while viewing.
 * **Fullscreen mode** for the active panel.
+* **Settings panel** to change grid size, background streaming behavior, and default save destinations.
+* **Preset snapshot and recording paths/patterns** with tokens for camera title, index, and timestamp.
 * **Save and load configuration** (`.json`), including:
 
   * All panel connection settings
@@ -61,8 +64,9 @@ Run the viewer:
 venv/bin/python main.py
 ```
 
-You’ll see a **2×2 camera panel grid**.
+You’ll see a **2×2 camera panel grid** by default.
 Click a panel to make it active (blue border). Use the form fields to configure that panel’s connection.
+Use the **Settings** button in the lower-left corner to switch grid presets, manage pagination, or set default save locations.
 
 ---
 
@@ -103,6 +107,22 @@ rtsp://user:pass@192.168.1.10:554/cam/realmonitor?channel=1&subtype=0
 | **Stop All**            | Stop all streams                                            |
 | **Save Config…**        | Save all panel settings + UI state                          |
 | **Load Config…**        | Load panel settings + optionally auto-start running streams |
+| **Previous / Next Page**| Navigate between camera pages when more panes exist         |
+| **Settings**            | Open the settings panel (grid presets, background streaming, default paths) |
+
+---
+
+### Settings Panel
+
+The **Settings** dialog appears at the bottom left of the controls column. It exposes:
+
+* **Grid preset** — choose 1×1, 2×2, 3×3, or 4×4 layouts. Larger layouts automatically add pages so you can manage all sixteen feeds.
+* **Background streaming** — keep inactive pages running (off by default so streams pause when you leave the page).
+* **Snapshot & recording directories** — define default folders for quick saving.
+* **Filename patterns** — generate default filenames using placeholders:
+  * `{title}`, `{index}`, `{channel}`, `{timestamp}`, or `$(date)` (alias for the timestamp).
+
+When background streaming is disabled, the viewer pauses streams on hidden pages and resumes them automatically when you return.
 
 ---
 
@@ -137,6 +157,7 @@ The recording runs in parallel with live viewing and will automatically stop whe
   * Per-panel credentials, host, port, slug, channel, subtype, transport, latency, and running state.
   * Active panel index and window size.
   * Fullscreen visibility.
+  * Grid preset, background streaming preference, and default snapshot/recording save patterns.
 
 ---
 
@@ -159,6 +180,16 @@ rtsp-client/
 
 * **Click panel** — select active panel.
 * **Esc / F11 / Q** — exit fullscreen.
+
+---
+
+## Changelog
+
+### Unreleased
+
+* Added a settings panel with grid presets (1×1 through 4×4), pagination controls, and a background streaming toggle.
+* Added configurable snapshot and recording save directories with pattern-based default filenames.
+* Extended the viewer to manage up to sixteen camera feeds through multi-page navigation.
 
 ---
 
