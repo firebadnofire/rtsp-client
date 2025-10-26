@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
 import av
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize, QRect
+from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
     QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QFrame, QSizePolicy,
@@ -225,6 +225,97 @@ class VideoWorker(QObject):
 # Widget Classes (from widgets.py)
 # ============================================================================
 
+class AspectRatioLabel(QLabel):
+    """QLabel derivative that paints pixmaps while preserving their aspect ratio."""
+
+    def __init__(self, target_size: QSize, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._target_size = target_size
+        self._pixmap: Optional[QPixmap] = None
+
+    def hasHeightForWidth(self) -> bool:
+        """Allow Qt layouts to compute height from width for proportional scaling."""
+
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        """Return the height that preserves the current or target aspect ratio."""
+
+        ratio = self._current_ratio()
+        return int(width * ratio)
+
+    def sizeHint(self) -> QSize:
+        """Report an appropriate default size based on the target ratio."""
+
+        return QSize(self._target_size.width(), self._target_size.height())
+
+    def minimumSizeHint(self) -> QSize:
+        """Ensure layouts can shrink the label while maintaining aspect ratio."""
+
+        base_width = max(80, int(self._target_size.width() * 0.2))
+        ratio = self._current_ratio()
+        return QSize(base_width, int(base_width * ratio))
+
+    def setPixmap(self, pixmap: Optional[QPixmap]) -> None:  # type: ignore[override]
+        """Store the pixmap for proportional painting and refresh the widget."""
+
+        self._pixmap = pixmap if pixmap and not pixmap.isNull() else None
+        if self._pixmap is None:
+            if not self.text():
+                self.setText("No video")
+        else:
+            if self.text():
+                self.setText("")
+        self.updateGeometry()
+        self.update()
+
+    def clear_pixmap(self) -> None:
+        """Remove any stored pixmap so placeholder text can be shown."""
+
+        self._pixmap = None
+        self.setText("No video")
+        self.updateGeometry()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """Draw the stored pixmap scaled to the available rect."""
+
+        if not self._pixmap:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        contents = self.contentsRect()
+        available_size = contents.size()
+        if available_size.isEmpty():
+            return
+
+        scaled_size = self._pixmap.size().scaled(
+            available_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+        )
+        top_left_x = contents.x() + (available_size.width() - scaled_size.width()) // 2
+        top_left_y = contents.y() + (available_size.height() - scaled_size.height()) // 2
+        target_rect = QRect(top_left_x, top_left_y, scaled_size.width(), scaled_size.height())
+        painter.fillRect(contents, self.palette().window())
+        painter.drawPixmap(target_rect, self._pixmap)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Trigger a repaint so scaled output stays crisp on resize."""
+
+        super().resizeEvent(event)
+        if self._pixmap:
+            self.update()
+
+    def _current_ratio(self) -> float:
+        """Return the active aspect ratio, falling back to the configured target."""
+
+        if self._pixmap and not self._pixmap.isNull():
+            return self._pixmap.height() / max(1, self._pixmap.width())
+        return self._target_size.height() / max(1, self._target_size.width())
+
+
 class VideoPane(QFrame):
     clicked = pyqtSignal(int)
 
@@ -249,7 +340,7 @@ class VideoPane(QFrame):
         # --- MODIFIED: Added object name for specific styling ---
         self.title.setObjectName("pane_title")
 
-        self.video_lbl = QLabel()
+        self.video_lbl = AspectRatioLabel(self._target_size, self)
         # --- MODIFIED: Added object name for specific styling ---
         self.video_lbl.setObjectName("video_lbl")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -282,20 +373,24 @@ class VideoPane(QFrame):
         if self._target_size.width() <= 0:
             return super().heightForWidth(width)
         title_h = self.title.sizeHint().height()
-        ratio = self._target_size.height() / max(1, self._target_size.width())
-        return int(width * ratio + title_h)
+        video_h = self.video_lbl.heightForWidth(width)
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        return int(video_h + title_h + spacing)
 
     def sizeHint(self) -> QSize:
         # Manually calculate hint based on layout to be safe
         title_h = self.title.sizeHint().height()
-        return QSize(self._target_size.width(), self._target_size.height() + title_h)
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        video_h = self.video_lbl.sizeHint().height()
+        return QSize(self._target_size.width(), video_h + title_h + spacing)
 
     def minimumSizeHint(self) -> QSize:
         """Provide a flexible minimum size that still respects the aspect ratio."""
         title_h = self.title.sizeHint().height()
         base_width = max(120, int(self._target_size.width() * 0.25))
-        ratio = self._target_size.height() / max(1, self._target_size.width())
-        return QSize(base_width, int(base_width * ratio + title_h))
+        video_h = self.video_lbl.minimumSizeHint().height()
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        return QSize(base_width, int(video_h + title_h + spacing))
 
     def set_active(self, active: bool):
         """
@@ -327,15 +422,7 @@ class VideoPane(QFrame):
     def _update_pixmap(self):
         if not self._last_pix:
             return
-        target = self.video_lbl.size()
-        if target.width() <= 0 or target.height() <= 0:
-            return
-        scaled = self._last_pix.scaled(
-            target,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.video_lbl.setPixmap(scaled)
+        self.video_lbl.setPixmap(self._last_pix)
 
 
 class FullscreenVideo(QWidget):
