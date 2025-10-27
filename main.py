@@ -799,6 +799,14 @@ class RtspApp(QWidget):
             }}
 
             /* DESTRUCTIVE ACTION BUTTONS */
+            QPushButton#stop_btn[running="true"], QPushButton#stop_all_btn[running="true"] {{
+                background-color: #f28b82; /* Google red for active stop */
+                color: #202124;
+            }}
+            QPushButton#stop_btn[running="true"]:hover, QPushButton#stop_all_btn[running="true"]:hover {{
+                background-color: #ea4335;
+                color: #ffffff;
+            }}
             QPushButton#stop_btn:hover, QPushButton#stop_all_btn:hover {{
                 background-color: #f28b82; /* Google red for stop hover */
                 color: #202124;
@@ -1253,7 +1261,8 @@ class RtspApp(QWidget):
         source_state = self.panel_states[source_index]
         dest_state = self.panel_states[dest_index]
 
-        if dest_state.get("running", False):
+        was_running = dest_state.get("running", False)
+        if was_running:
             self.stop_stream()
         if dest_state.get("recording", False):
             self.workers[dest_index].stop_recording()
@@ -1277,9 +1286,13 @@ class RtspApp(QWidget):
         for key in fields_to_copy:
             dest_state[key] = source_state.get(key, dest_state.get(key))
 
+        can_restart = was_running and bool(self.build_url_from_state(dest_state))
+
         self.panes[dest_index].title.setText(dest_state["title"])
         self._refresh_copy_source_labels()
         self._sync_ui_from_state()
+        if can_restart:
+            self.start_stream()
         self.status_lbl.setText(
             f"Copied settings from Panel {source_index + 1} to Panel {dest_index + 1}"
         )
@@ -1589,15 +1602,23 @@ class RtspApp(QWidget):
     def _update_buttons_enabled(self):
         running = self.panel_states[self.active_index]["running"]
         recording = self.panel_states[self.active_index].get("recording", False)
+        any_running = any(state["running"] for state in self.panel_states)
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
+        self.stop_btn.setProperty("running", running)
         self.snapshot_btn.setEnabled(running)
         self.record_btn.setEnabled(running)
         self.record_btn.setText("Stop Recording" if recording else "Record")
         self.record_btn.setProperty("recording", recording)
+        self.stop_all_btn.setEnabled(any_running)
+        self.stop_all_btn.setProperty("running", any_running)
         # Re-polish the button to force a style update
+        self.stop_btn.style().unpolish(self.stop_btn)
+        self.stop_btn.style().polish(self.stop_btn)
         self.record_btn.style().unpolish(self.record_btn)
         self.record_btn.style().polish(self.record_btn)
+        self.stop_all_btn.style().unpolish(self.stop_all_btn)
+        self.stop_all_btn.style().polish(self.stop_all_btn)
         self.fullscreen_btn.setEnabled(True)
 
     def start_all_streams(self):
