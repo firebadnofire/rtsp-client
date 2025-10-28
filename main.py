@@ -4,15 +4,19 @@ import sys
 import json
 import threading
 import time
+import math
+import re
+from datetime import datetime
+from pathlib import Path
 from typing import Optional, List, Dict, Any, Tuple
 
 import av
-from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize
-from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette
+from PyQt6.QtCore import Qt, QObject, pyqtSignal, QSize, QRect
+from PyQt6.QtGui import QImage, QPixmap, QCursor, QColor, QPalette, QPainter
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton, QHBoxLayout, QVBoxLayout,
-    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QGridLayout, QFrame,
-    QSizePolicy, QListView
+    QComboBox, QSpinBox, QFileDialog, QMessageBox, QFormLayout, QFrame, QSizePolicy,
+    QListView, QDialog, QDialogButtonBox, QCheckBox, QGridLayout
 )
 
 # ============================================================================
@@ -221,6 +225,97 @@ class VideoWorker(QObject):
 # Widget Classes (from widgets.py)
 # ============================================================================
 
+class AspectRatioLabel(QLabel):
+    """QLabel derivative that paints pixmaps while preserving their aspect ratio."""
+
+    def __init__(self, target_size: QSize, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._target_size = target_size
+        self._pixmap: Optional[QPixmap] = None
+
+    def hasHeightForWidth(self) -> bool:
+        """Allow Qt layouts to compute height from width for proportional scaling."""
+
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        """Return the height that preserves the current or target aspect ratio."""
+
+        ratio = self._current_ratio()
+        return int(width * ratio)
+
+    def sizeHint(self) -> QSize:
+        """Report an appropriate default size based on the target ratio."""
+
+        return QSize(self._target_size.width(), self._target_size.height())
+
+    def minimumSizeHint(self) -> QSize:
+        """Ensure layouts can shrink the label while maintaining aspect ratio."""
+
+        base_width = max(80, int(self._target_size.width() * 0.2))
+        ratio = self._current_ratio()
+        return QSize(base_width, int(base_width * ratio))
+
+    def setPixmap(self, pixmap: Optional[QPixmap]) -> None:  # type: ignore[override]
+        """Store the pixmap for proportional painting and refresh the widget."""
+
+        self._pixmap = pixmap if pixmap and not pixmap.isNull() else None
+        if self._pixmap is None:
+            if not self.text():
+                self.setText("No video")
+        else:
+            if self.text():
+                self.setText("")
+        self.updateGeometry()
+        self.update()
+
+    def clear_pixmap(self) -> None:
+        """Remove any stored pixmap so placeholder text can be shown."""
+
+        self._pixmap = None
+        self.setText("No video")
+        self.updateGeometry()
+        self.update()
+
+    def paintEvent(self, event) -> None:  # type: ignore[override]
+        """Draw the stored pixmap scaled to the available rect."""
+
+        if not self._pixmap:
+            super().paintEvent(event)
+            return
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform, True)
+        contents = self.contentsRect()
+        available_size = contents.size()
+        if available_size.isEmpty():
+            return
+
+        scaled_size = self._pixmap.size().scaled(
+            available_size,
+            Qt.AspectRatioMode.KeepAspectRatio,
+        )
+        top_left_x = contents.x() + (available_size.width() - scaled_size.width()) // 2
+        top_left_y = contents.y() + (available_size.height() - scaled_size.height()) // 2
+        target_rect = QRect(top_left_x, top_left_y, scaled_size.width(), scaled_size.height())
+        painter.fillRect(contents, self.palette().window())
+        painter.drawPixmap(target_rect, self._pixmap)
+
+    def resizeEvent(self, event) -> None:  # type: ignore[override]
+        """Trigger a repaint so scaled output stays crisp on resize."""
+
+        super().resizeEvent(event)
+        if self._pixmap:
+            self.update()
+
+    def _current_ratio(self) -> float:
+        """Return the active aspect ratio, falling back to the configured target."""
+
+        if self._pixmap and not self._pixmap.isNull():
+            return self._pixmap.height() / max(1, self._pixmap.width())
+        return self._target_size.height() / max(1, self._target_size.width())
+
+
 class VideoPane(QFrame):
     clicked = pyqtSignal(int)
 
@@ -245,13 +340,19 @@ class VideoPane(QFrame):
         # --- MODIFIED: Added object name for specific styling ---
         self.title.setObjectName("pane_title")
 
-        self.video_lbl = QLabel()
+        self.video_lbl = AspectRatioLabel(self._target_size, self)
         # --- MODIFIED: Added object name for specific styling ---
         self.video_lbl.setObjectName("video_lbl")
         self.video_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.video_lbl.setText("No video")
-        self.video_lbl.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.video_lbl.setMinimumSize(self._target_size)
+
+        video_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        video_policy.setHeightForWidth(True)
+        self.video_lbl.setSizePolicy(video_policy)
+
+        pane_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        pane_policy.setHeightForWidth(True)
+        self.setSizePolicy(pane_policy)
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 0, 0, 0)
@@ -263,10 +364,33 @@ class VideoPane(QFrame):
         wrap.addWidget(self.video_lbl, 1)
         v.addLayout(wrap, 1)
 
+    def hasHeightForWidth(self) -> bool:
+        """Indicate that pane height should be derived from the allotted width."""
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        """Compute a height that preserves the pane's target aspect ratio."""
+        if self._target_size.width() <= 0:
+            return super().heightForWidth(width)
+        title_h = self.title.sizeHint().height()
+        video_h = self.video_lbl.heightForWidth(width)
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        return int(video_h + title_h + spacing)
+
     def sizeHint(self) -> QSize:
         # Manually calculate hint based on layout to be safe
         title_h = self.title.sizeHint().height()
-        return QSize(self._target_size.width(), self._target_size.height() + title_h)
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        video_h = self.video_lbl.sizeHint().height()
+        return QSize(self._target_size.width(), video_h + title_h + spacing)
+
+    def minimumSizeHint(self) -> QSize:
+        """Provide a flexible minimum size that still respects the aspect ratio."""
+        title_h = self.title.sizeHint().height()
+        base_width = max(120, int(self._target_size.width() * 0.25))
+        video_h = self.video_lbl.minimumSizeHint().height()
+        spacing = max(0, self.layout().spacing() if self.layout() else 0)
+        return QSize(base_width, int(video_h + title_h + spacing))
 
     def set_active(self, active: bool):
         """
@@ -298,15 +422,7 @@ class VideoPane(QFrame):
     def _update_pixmap(self):
         if not self._last_pix:
             return
-        target = self.video_lbl.size()
-        if target.width() <= 0 or target.height() <= 0:
-            return
-        scaled = self._last_pix.scaled(
-            target,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation
-        )
-        self.video_lbl.setPixmap(scaled)
+        self.video_lbl.setPixmap(self._last_pix)
 
 
 class FullscreenVideo(QWidget):
@@ -367,6 +483,90 @@ class FullscreenVideo(QWidget):
         super().hideEvent(e)
 
 
+class SettingsDialog(QDialog):
+    """Modal dialog that exposes configurable application settings."""
+
+    def __init__(
+        self,
+        parent: Optional[QWidget],
+        current_settings: Dict[str, Any],
+        grid_presets: Dict[str, Tuple[int, int]],
+    ) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Settings")
+        self.setModal(True)
+        self._grid_presets = grid_presets
+        layout = QVBoxLayout(self)
+
+        form_layout = QFormLayout()
+
+        self.grid_combo = QComboBox()
+        for label in grid_presets.keys():
+            self.grid_combo.addItem(label)
+        current_grid = current_settings.get("grid_preset", "2x2")
+        idx = self.grid_combo.findText(current_grid)
+        self.grid_combo.setCurrentIndex(max(idx, 0))
+        form_layout.addRow("Grid size:", self.grid_combo)
+
+        self.keep_streams_check = QCheckBox("Keep streams active on hidden pages")
+        self.keep_streams_check.setChecked(bool(current_settings.get("keep_streams_active", False)))
+        form_layout.addRow("Background streaming:", self.keep_streams_check)
+
+        self.snapshot_path_edit = QLineEdit(current_settings.get("snapshot_path", ""))
+        snapshot_path_row = QHBoxLayout()
+        snapshot_path_row.addWidget(self.snapshot_path_edit)
+        snapshot_path_browse = QPushButton("Browse…")
+        snapshot_path_browse.clicked.connect(lambda: self._browse_for_directory(self.snapshot_path_edit))
+        snapshot_path_row.addWidget(snapshot_path_browse)
+        form_layout.addRow("Snapshot directory:", snapshot_path_row)
+
+        self.snapshot_pattern_edit = QLineEdit(current_settings.get("snapshot_pattern", "{title}_{timestamp}.png"))
+        form_layout.addRow("Snapshot filename pattern:", self.snapshot_pattern_edit)
+
+        self.record_path_edit = QLineEdit(current_settings.get("record_path", ""))
+        record_path_row = QHBoxLayout()
+        record_path_row.addWidget(self.record_path_edit)
+        record_path_browse = QPushButton("Browse…")
+        record_path_browse.clicked.connect(lambda: self._browse_for_directory(self.record_path_edit))
+        record_path_row.addWidget(record_path_browse)
+        form_layout.addRow("Recording directory:", record_path_row)
+
+        self.record_pattern_edit = QLineEdit(current_settings.get("record_pattern", "{title}_{timestamp}.mkv"))
+        form_layout.addRow("Recording filename pattern:", self.record_pattern_edit)
+
+        layout.addLayout(form_layout)
+
+        pattern_hint = QLabel(
+            "Use {title}, {index}, {channel}, {timestamp}, or $(date) placeholders."
+        )
+        pattern_hint.setWordWrap(True)
+        layout.addWidget(pattern_hint)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _browse_for_directory(self, target: QLineEdit) -> None:
+        """Open a directory picker and write the selected path into the given editor."""
+
+        directory = QFileDialog.getExistingDirectory(self, "Select Directory", target.text() or str(Path.home()))
+        if directory:
+            target.setText(directory)
+
+    def result_settings(self) -> Dict[str, Any]:
+        """Return the settings chosen by the user."""
+
+        return {
+            "grid_preset": self.grid_combo.currentText(),
+            "keep_streams_active": self.keep_streams_check.isChecked(),
+            "snapshot_path": self.snapshot_path_edit.text(),
+            "snapshot_pattern": self.snapshot_pattern_edit.text(),
+            "record_path": self.record_path_edit.text(),
+            "record_pattern": self.record_pattern_edit.text(),
+        }
+
+
 # ============================================================================
 # Main Application Window (from main_window.py)
 # ============================================================================
@@ -389,21 +589,27 @@ class RtspApp(QWidget):
         self._layout_margin = max(12, int(20 * self._scale))
         self._footer_height = max(40, int(52 * self._scale))
 
+        self.max_channels = 16
+        self.grid_presets: Dict[str, Tuple[int, int]] = {
+            "1x1": (1, 1),
+            "2x2": (2, 2),
+            "3x3": (3, 3),
+            "4x4": (4, 4),
+        }
+        self.app_settings: Dict[str, Any] = self._default_settings()
+
         init_w, init_h = self._initial_window_dimensions()
         self.resize(init_w, init_h)
         self.setMinimumSize(int(init_w * 0.85), int(init_h * 0.85))
 
         # Per-panel state
         self.panel_states: List[Dict[str, Any]] = [
-            {
-                "user": "", "pass": "", "ip": "", "port": 554,
-                "slug": DEFAULT_CAMERA_SLUG, "channel": "1", "subtype": "0",
-                "transport": DEFAULT_TRANSPORT, "latency": DEFAULT_LATENCY_MS,
-                "running": False, "recording": False, "title": f"Feed {i + 1}",
-            } for i in range(4)
+            self._default_panel_state(i) for i in range(self.max_channels)
         ]
-        self.workers: List[VideoWorker] = [VideoWorker() for _ in range(4)]
+        self.workers: List[VideoWorker] = [VideoWorker() for _ in range(self.max_channels)]
         self.active_index: int = 0
+        self.current_page: int = 0
+        self.panes_per_page: int = self._calculate_panes_per_page()
 
         # UI Initialization
         self._init_ui()
@@ -415,6 +621,7 @@ class RtspApp(QWidget):
             worker.frame_ready.connect(self.panes[i].on_frame)
             worker.status.connect(self._make_status_updater(i))
             worker.recording_status.connect(self._make_recording_status_updater(i))
+            worker.stopped.connect(self._make_worker_stopped_handler(i))
 
         # Fullscreen window (initially hidden)
         self.fullwin = FullscreenVideo()
@@ -423,6 +630,40 @@ class RtspApp(QWidget):
         # Explicitly initialize the UI for the first panel
         self._sync_ui_from_state()
         self._update_active_styles()
+
+    def _default_settings(self) -> Dict[str, Any]:
+        """Return the default application settings dictionary."""
+
+        pictures = Path.home() / "Pictures"
+        videos = Path.home() / "Videos"
+        return {
+            "grid_preset": "2x2",
+            "keep_streams_active": False,
+            "snapshot_path": str(pictures),
+            "snapshot_pattern": "{title}_{timestamp}.png",
+            "record_path": str(videos),
+            "record_pattern": "{title}_{timestamp}.mkv",
+        }
+
+    def _default_panel_state(self, index: int) -> Dict[str, Any]:
+        """Return the default state dictionary for a panel index."""
+
+        return {
+            "user": "",
+            "pass": "",
+            "ip": "",
+            "port": 554,
+            "slug": DEFAULT_CAMERA_SLUG,
+            "channel": "1",
+            "subtype": "0",
+            "transport": DEFAULT_TRANSPORT,
+            "latency": DEFAULT_LATENCY_MS,
+            "running": False,
+            "recording": False,
+            "resume_on_return": False,
+            "paused_for_page": False,
+            "title": f"Feed {index + 1}",
+        }
 
     def _calculate_scale(self) -> float:
         screen = QApplication.primaryScreen()
@@ -436,10 +677,23 @@ class RtspApp(QWidget):
         scale = min(scale_w, scale_h, 1.0)
         return max(scale, 0.4)
 
+    def _grid_dimensions(self) -> Tuple[int, int]:
+        """Return the number of rows and columns for the current grid preset."""
+
+        preset = self.app_settings.get("grid_preset", "2x2")
+        return self.grid_presets.get(preset, self.grid_presets["2x2"])
+
+    def _calculate_panes_per_page(self) -> int:
+        """Calculate how many panes should be shown per page."""
+
+        rows, cols = self._grid_dimensions()
+        return max(1, rows * cols)
+
     def _initial_window_dimensions(self) -> Tuple[int, int]:
-        grid_width = self._pane_target.width() * 2 + self._grid_spacing
+        rows, cols = self._grid_dimensions()
+        grid_width = (self._pane_target.width() * cols) + self._grid_spacing * max(0, cols - 1)
         total_width = grid_width + self._controls_width + self._main_spacing + self._layout_margin * 2
-        grid_height = self._pane_target.height() * 2 + self._grid_spacing
+        grid_height = (self._pane_target.height() * rows) + self._grid_spacing * max(0, rows - 1)
         total_height = grid_height + self._footer_height + self._layout_margin * 2
         return total_width, total_height
 
@@ -545,6 +799,14 @@ class RtspApp(QWidget):
             }}
 
             /* DESTRUCTIVE ACTION BUTTONS */
+            QPushButton#stop_btn[running="true"], QPushButton#stop_all_btn[running="true"] {{
+                background-color: #f28b82; /* Google red for active stop */
+                color: #202124;
+            }}
+            QPushButton#stop_btn[running="true"]:hover, QPushButton#stop_all_btn[running="true"]:hover {{
+                background-color: #ea4335;
+                color: #ffffff;
+            }}
             QPushButton#stop_btn:hover, QPushButton#stop_all_btn:hover {{
                 background-color: #f28b82; /* Google red for stop hover */
                 color: #202124;
@@ -665,16 +927,21 @@ class RtspApp(QWidget):
         self.url_preview.setReadOnly(True)
         self.status_lbl = QLabel("Idle")
 
-        # --- 2x2 Grid of Video Panes ---
+        # --- Grid of Video Panes ---
         self.panes: List[VideoPane] = [
-            VideoPane(i, target_size=self._pane_target, scale=self._scale) for i in range(4)
+            VideoPane(i, target_size=self._pane_target, scale=self._scale)
+            for i in range(self.max_channels)
         ]
-        grid = QGridLayout()
-        grid.setSpacing(self._grid_spacing)
-        grid.addWidget(self.panes[0], 0, 0)
-        grid.addWidget(self.panes[1], 0, 1)
-        grid.addWidget(self.panes[2], 1, 0)
-        grid.addWidget(self.panes[3], 1, 1)
+        self.grid_widget = QWidget()
+        grid_policy = QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        grid_policy.setHeightForWidth(True)
+        self.grid_widget.setSizePolicy(grid_policy)
+        self.grid_layout = QGridLayout(self.grid_widget)
+        self.grid_layout.setSpacing(self._grid_spacing)
+        self.grid_layout.setContentsMargins(0, 0, 0, 0)
+        self._grid_row_count = 0
+        self._grid_col_count = 0
+        self._refresh_grid_layout()
 
         # --- Layout Section ---
         controls_widget = QWidget()
@@ -726,6 +993,16 @@ class RtspApp(QWidget):
         config_actions.addWidget(self.load_cfg_btn)
         config_actions.addStretch(1) # Push buttons to the left
 
+        copy_controls_layout = QHBoxLayout()
+        copy_controls_layout.setSpacing(self._form_spacing)
+        self.copy_source_combo = self._build_combo([
+            f"Panel {i + 1}" for i in range(self.max_channels)
+        ])
+        copy_controls_layout.addWidget(self.copy_source_combo, 1)
+        self.copy_btn = QPushButton("Copy to Active")
+        self.copy_btn.setObjectName("copy_btn")
+        copy_controls_layout.addWidget(self.copy_btn)
+
         # Assemble the controls in the left-side vertical layout
         controls_layout.addWidget(QLabel("<b>Active Panel Controls</b>"))
         controls_layout.addLayout(form)
@@ -739,13 +1016,31 @@ class RtspApp(QWidget):
         controls_layout.addWidget(QLabel("<b>Global Actions</b>"))
         controls_layout.addLayout(global_stream_actions)
         controls_layout.addLayout(config_actions)
+        controls_layout.addWidget(QLabel("<b>Copy Panel Settings</b>"))
+        controls_layout.addLayout(copy_controls_layout)
         controls_layout.addStretch(1)
+
+        self.page_controls_widget = QWidget()
+        page_controls_layout = QHBoxLayout(self.page_controls_widget)
+        page_controls_layout.setContentsMargins(0, 0, 0, 0)
+        page_controls_layout.setSpacing(self._form_spacing)
+        self.prev_page_btn = QPushButton("◀")
+        self.next_page_btn = QPushButton("▶")
+        self.page_combo = self._build_combo([])
+        page_controls_layout.addWidget(self.prev_page_btn)
+        page_controls_layout.addWidget(self.page_combo, 1)
+        page_controls_layout.addWidget(self.next_page_btn)
+        controls_layout.addWidget(self.page_controls_widget)
+
+        self.settings_btn = QPushButton("Settings")
+        self.settings_btn.setObjectName("settings_btn")
+        controls_layout.addWidget(self.settings_btn, alignment=Qt.AlignmentFlag.AlignLeft)
 
         main_layout = QHBoxLayout()
         main_layout.setSpacing(self._main_spacing)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.addWidget(controls_widget)
-        main_layout.addLayout(grid, 1)
+        main_layout.addWidget(self.grid_widget, 1)
 
         top_level_layout = QVBoxLayout(self)
         top_level_layout.setContentsMargins(
@@ -780,6 +1075,317 @@ class RtspApp(QWidget):
         self.stop_all_btn.clicked.connect(self.stop_all_streams)
         self.save_cfg_btn.clicked.connect(self.save_config)
         self.load_cfg_btn.clicked.connect(self.load_config)
+        self.prev_page_btn.clicked.connect(self._previous_page)
+        self.next_page_btn.clicked.connect(self._next_page)
+        self.page_combo.currentIndexChanged.connect(self._page_combo_changed)
+        self.settings_btn.clicked.connect(self.open_settings_dialog)
+        self.copy_btn.clicked.connect(self._copy_selected_panel_settings)
+        self.copy_source_combo.currentIndexChanged.connect(self._update_copy_controls)
+
+        self._update_page_controls()
+        self._refresh_copy_source_labels()
+        self._update_copy_controls()
+
+    def _refresh_grid_layout(self) -> None:
+        """Rebuild the grid widget for the current page and grid preset."""
+
+        if not hasattr(self, "grid_layout"):
+            return
+        for r in range(self._grid_row_count):
+            self.grid_layout.setRowStretch(r, 0)
+        for c in range(self._grid_col_count):
+            self.grid_layout.setColumnStretch(c, 0)
+        while self.grid_layout.count():
+            item = self.grid_layout.takeAt(0)
+            widget = item.widget()
+            if widget:
+                widget.setParent(None)
+
+        for pane in self.panes:
+            pane.hide()
+
+        rows, cols = self._grid_dimensions()
+        cols = max(1, cols)
+        start_index = self.current_page * self.panes_per_page
+        end_index = min(start_index + self.panes_per_page, self.max_channels)
+        for offset, pane_index in enumerate(range(start_index, end_index)):
+            pane = self.panes[pane_index]
+            state = self.panel_states[pane_index]
+            pane.title.setText(state.get("title", f"Feed {pane_index + 1}"))
+            row = offset // cols
+            col = offset % cols
+            self.grid_layout.addWidget(pane, row, col)
+            pane.updateGeometry()
+            pane.show()
+
+        for r in range(rows):
+            self.grid_layout.setRowStretch(r, 1)
+        for c in range(cols):
+            self.grid_layout.setColumnStretch(c, 1)
+        self._grid_row_count = rows
+        self._grid_col_count = cols
+
+        self.grid_widget.updateGeometry()
+        self._update_active_styles()
+
+    def _page_indexes(self, page: int) -> List[int]:
+        """Return the global panel indexes that belong to a specific page."""
+
+        start = max(0, page) * self.panes_per_page
+        end = min(start + self.panes_per_page, self.max_channels)
+        return list(range(start, end))
+
+    def _total_pages(self) -> int:
+        """Compute how many pages are needed for the current grid preset."""
+
+        return max(1, math.ceil(self.max_channels / self.panes_per_page))
+
+    def _update_page_controls(self) -> None:
+        """Refresh the pagination controls to reflect current state."""
+
+        total_pages = self._total_pages()
+        show_controls = total_pages > 1
+        self.page_controls_widget.setVisible(show_controls)
+
+        self.page_combo.blockSignals(True)
+        self.page_combo.clear()
+        for i in range(total_pages):
+            self.page_combo.addItem(f"Page {i + 1}")
+        self.current_page = min(self.current_page, total_pages - 1)
+        self.page_combo.setCurrentIndex(self.current_page)
+        self.page_combo.blockSignals(False)
+
+        self.prev_page_btn.setEnabled(show_controls and self.current_page > 0)
+        self.next_page_btn.setEnabled(show_controls and self.current_page < total_pages - 1)
+        self.page_combo.setEnabled(show_controls)
+
+    def _refresh_copy_source_labels(self) -> None:
+        """Keep the copy-source combo box labels aligned with panel titles."""
+
+        if not hasattr(self, "copy_source_combo"):
+            return
+        for i in range(self.max_channels):
+            label = self.panel_states[i].get("title", f"Feed {i + 1}")
+            self.copy_source_combo.setItemText(i, f"{i + 1}: {label}")
+
+    def _update_copy_controls(self) -> None:
+        """Enable or disable copy controls based on the active panel."""
+
+        if not hasattr(self, "copy_btn"):
+            return
+        enable = self.copy_source_combo.currentIndex() != self.active_index
+        self.copy_btn.setEnabled(enable)
+
+    def _previous_page(self) -> None:
+        """Navigate to the previous page of camera panes."""
+
+        self._switch_page(self.current_page - 1)
+
+    def _next_page(self) -> None:
+        """Navigate to the next page of camera panes."""
+
+        self._switch_page(self.current_page + 1)
+
+    def _page_combo_changed(self, index: int) -> None:
+        """Handle direct selection of a page from the combo box."""
+
+        self._switch_page(index)
+
+    def _switch_page(self, new_page: int) -> None:
+        """Switch to another page and manage stream lifetimes accordingly."""
+
+        total_pages = self._total_pages()
+        if total_pages <= 1:
+            return
+        target_page = max(0, min(new_page, total_pages - 1))
+        if target_page == self.current_page:
+            return
+
+        self._sync_state_from_ui()
+
+        if not self.app_settings.get("keep_streams_active", False):
+            self._handle_page_stream_transition(target_page)
+
+        self.current_page = target_page
+        page_indexes = self._page_indexes(self.current_page)
+        if not page_indexes:
+            self.active_index = 0
+        else:
+            self.active_index = page_indexes[0]
+
+        self._refresh_grid_layout()
+        self._update_page_controls()
+        self._sync_ui_from_state()
+
+    def _handle_page_stream_transition(self, target_page: int) -> None:
+        """Stop streams when leaving a page and resume on return if requested."""
+
+        current_indexes = self._page_indexes(self.current_page)
+        target_indexes = set(self._page_indexes(target_page))
+
+        for idx in current_indexes:
+            state = self.panel_states[idx]
+            resume = state.get("running", False)
+            state["resume_on_return"] = resume
+            state["paused_for_page"] = resume
+            if state.get("recording", False):
+                self.workers[idx].stop_recording()
+                state["recording"] = False
+            if resume:
+                self.workers[idx].stop()
+                state["running"] = False
+
+        for idx in target_indexes:
+            state = self.panel_states[idx]
+            should_resume = state.get("resume_on_return", False) and state.get("paused_for_page", False)
+            state["resume_on_return"] = False
+            if should_resume and state.get("ip"):
+                url = self.build_url_from_state(state)
+                if url:
+                    self.workers[idx].start(url, state["transport"], state["latency"])
+                    state["running"] = True
+            state["paused_for_page"] = False
+
+    def _copy_selected_panel_settings(self) -> None:
+        """Copy camera credentials and connection fields into the active panel."""
+
+        if not hasattr(self, "copy_source_combo"):
+            return
+        source_index = self.copy_source_combo.currentIndex()
+        dest_index = self.active_index
+        if source_index == dest_index:
+            return
+
+        self._sync_state_from_ui()
+
+        source_state = self.panel_states[source_index]
+        dest_state = self.panel_states[dest_index]
+
+        was_running = dest_state.get("running", False)
+        if was_running:
+            self.stop_stream()
+        if dest_state.get("recording", False):
+            self.workers[dest_index].stop_recording()
+            dest_state["recording"] = False
+        dest_state["running"] = False
+        dest_state["recording"] = False
+        dest_state["resume_on_return"] = False
+        dest_state["paused_for_page"] = False
+
+        fields_to_copy = [
+            "user",
+            "pass",
+            "ip",
+            "port",
+            "slug",
+            "channel",
+            "subtype",
+            "transport",
+            "latency",
+        ]
+        for key in fields_to_copy:
+            dest_state[key] = source_state.get(key, dest_state.get(key))
+
+        can_restart = was_running and bool(self.build_url_from_state(dest_state))
+
+        self.panes[dest_index].title.setText(dest_state["title"])
+        self._refresh_copy_source_labels()
+        self._sync_ui_from_state()
+        if can_restart:
+            self.start_stream()
+        self.status_lbl.setText(
+            f"Copied settings from Panel {source_index + 1} to Panel {dest_index + 1}"
+        )
+
+    def _resolve_base_directory(self, configured_path: str, fallback: Path) -> Path:
+        """Expand and return a directory path, falling back if empty."""
+
+        if configured_path:
+            return Path(configured_path).expanduser()
+        return fallback
+
+    def _expand_pattern_to_path(
+        self,
+        base_dir: Path,
+        pattern: str,
+        state: Dict[str, Any],
+        index: int,
+        extension: str,
+    ) -> Path:
+        """Create a concrete file path from the configured filename pattern."""
+
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        safe_title = re.sub(r"[^A-Za-z0-9_-]+", "_", state.get("title", f"Feed {index + 1}")) or f"Feed_{index + 1}"
+        replacements = {
+            "{title}": safe_title,
+            "{index}": str(index + 1),
+            "{channel}": state.get("channel", ""),
+            "{timestamp}": timestamp,
+            "$(date)": timestamp,
+        }
+        resolved = pattern or f"{safe_title}_{timestamp}.{extension}"
+        for token, value in replacements.items():
+            resolved = resolved.replace(token, value)
+        resolved = resolved.strip()
+        if not Path(resolved).suffix:
+            resolved = f"{resolved}.{extension}"
+        return base_dir.joinpath(resolved)
+
+    def _enforce_background_stream_setting(self) -> None:
+        """Ensure background streams follow the current keep-alive setting."""
+
+        if self.app_settings.get("keep_streams_active", False):
+            return
+        visible_indexes = set(self._page_indexes(self.current_page))
+        for idx in range(self.max_channels):
+            if idx in visible_indexes:
+                continue
+            state = self.panel_states[idx]
+            if state.get("recording", False):
+                self.workers[idx].stop_recording()
+                state["recording"] = False
+            if state.get("running", False):
+                state["resume_on_return"] = True
+                state["paused_for_page"] = True
+                self.workers[idx].stop()
+                state["running"] = False
+            else:
+                state["resume_on_return"] = False
+                state["paused_for_page"] = False
+
+    def open_settings_dialog(self) -> None:
+        """Display the settings dialog and apply changes when accepted."""
+
+        dialog = SettingsDialog(self, self.app_settings, self.grid_presets)
+        if dialog.exec() != int(QDialog.DialogCode.Accepted):
+            return
+
+        previous_grid = self.app_settings.get("grid_preset")
+        previous_keep = self.app_settings.get("keep_streams_active", False)
+        new_settings = dialog.result_settings()
+        self.app_settings.update(new_settings)
+
+        if previous_grid != self.app_settings.get("grid_preset"):
+            self.panes_per_page = self._calculate_panes_per_page()
+            total_pages = self._total_pages()
+            self.current_page = min(self.current_page, total_pages - 1)
+            page_indexes = self._page_indexes(self.current_page)
+            if self.active_index not in page_indexes:
+                self.active_index = page_indexes[0] if page_indexes else 0
+            self._refresh_grid_layout()
+        else:
+            self._refresh_grid_layout()
+
+        if previous_keep and not self.app_settings.get("keep_streams_active", False):
+            self._enforce_background_stream_setting()
+        elif not previous_keep and self.app_settings.get("keep_streams_active", False):
+            for state in self.panel_states:
+                state["resume_on_return"] = False
+                state["paused_for_page"] = False
+
+        self._update_page_controls()
+        self._sync_ui_from_state()
+        self._update_buttons_enabled()
 
     def build_url_from_state(self, st: Dict[str, Any], include_password: bool = True) -> str:
         user = st.get("user", "")
@@ -822,6 +1428,7 @@ class RtspApp(QWidget):
             self.transport_combo.blockSignals(False)
         self._update_buttons_enabled()
         self.update_preview()
+        self._update_copy_controls()
 
     def _sync_state_from_ui(self):
         st = self.panel_states[self.active_index]
@@ -836,6 +1443,7 @@ class RtspApp(QWidget):
         st["transport"] = self.transport_combo.currentText()
         st["latency"] = self.latency_spin.value()
         self.panes[self.active_index].title.setText(st["title"])
+        self._refresh_copy_source_labels()
 
     def _set_combo_value(self, combo: QComboBox, value: str):
         idx = combo.findText(str(value))
@@ -859,7 +1467,13 @@ class RtspApp(QWidget):
             self.start_stream()
 
     def set_active_panel(self, index: int):
-        if not (0 <= index < 4) or index == self.active_index: return
+        if not (0 <= index < self.max_channels):
+            return
+        target_page = index // self.panes_per_page
+        if target_page != self.current_page:
+            self._switch_page(target_page)
+        if index == self.active_index:
+            return
         self._sync_state_from_ui()
         self.active_index = index
         self._sync_ui_from_state()
@@ -881,6 +1495,8 @@ class RtspApp(QWidget):
         worker = self.workers[self.active_index]
         worker.start(url, st["transport"], st["latency"])
         st["running"] = True
+        st["resume_on_return"] = False
+        st["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def stop_stream(self):
@@ -891,6 +1507,8 @@ class RtspApp(QWidget):
             self.panel_states[self.active_index]["recording"] = False
         worker.stop()
         self.panel_states[self.active_index]["running"] = False
+        self.panel_states[self.active_index]["resume_on_return"] = False
+        self.panel_states[self.active_index]["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def snapshot(self):
@@ -898,8 +1516,23 @@ class RtspApp(QWidget):
         if not st["running"]:
             QMessageBox.information(self, "Stream Off", "Cannot take a snapshot, the stream is not running.")
             return
-        default_name = f"{st['title'].replace(' ', '_')}.jpg"
-        path, _ = QFileDialog.getSaveFileName(self, "Save Snapshot", default_name, "Images (*.jpg *.png)")
+        base_dir = self._resolve_base_directory(
+            self.app_settings.get("snapshot_path", ""),
+            Path.home() / "Pictures",
+        )
+        default_path = self._expand_pattern_to_path(
+            base_dir,
+            self.app_settings.get("snapshot_pattern", "{title}_{timestamp}.png"),
+            st,
+            self.active_index,
+            "png",
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Snapshot",
+            str(default_path),
+            "Images (*.jpg *.png)",
+        )
         if path and not self.workers[self.active_index].save_snapshot(path):
             QMessageBox.warning(self, "Snapshot Failed", "Could not save snapshot. No frame received yet?")
     
@@ -919,9 +1552,22 @@ class RtspApp(QWidget):
             self._update_buttons_enabled()
         else:
             # Start recording
-            default_name = f"{st['title'].replace(' ', '_')}.mkv"
+            base_dir = self._resolve_base_directory(
+                self.app_settings.get("record_path", ""),
+                Path.home() / "Videos",
+            )
+            default_path = self._expand_pattern_to_path(
+                base_dir,
+                self.app_settings.get("record_pattern", "{title}_{timestamp}.mkv"),
+                st,
+                self.active_index,
+                "mkv",
+            )
             path, _ = QFileDialog.getSaveFileName(
-                self, "Save Recording", default_name, "Video Files (*.mkv)"
+                self,
+                "Save Recording",
+                str(default_path),
+                "Video Files (*.mkv)",
             )
             if path:
                 if worker.start_recording(path):
@@ -938,18 +1584,41 @@ class RtspApp(QWidget):
                 self._update_buttons_enabled()
         return update_recording_status
 
+    def _make_worker_stopped_handler(self, index: int):
+        """Ensure panel state reflects when a worker stops streaming."""
+
+        def handle_worker_stopped() -> None:
+            state = self.panel_states[index]
+            state["running"] = False
+            if not state.get("resume_on_return", False):
+                state["paused_for_page"] = False
+            if state.get("recording", False):
+                state["recording"] = False
+            if index == self.active_index:
+                self._update_buttons_enabled()
+
+        return handle_worker_stopped
+
     def _update_buttons_enabled(self):
         running = self.panel_states[self.active_index]["running"]
         recording = self.panel_states[self.active_index].get("recording", False)
+        any_running = any(state["running"] for state in self.panel_states)
         self.start_btn.setEnabled(not running)
         self.stop_btn.setEnabled(running)
+        self.stop_btn.setProperty("running", running)
         self.snapshot_btn.setEnabled(running)
         self.record_btn.setEnabled(running)
         self.record_btn.setText("Stop Recording" if recording else "Record")
         self.record_btn.setProperty("recording", recording)
+        self.stop_all_btn.setEnabled(any_running)
+        self.stop_all_btn.setProperty("running", any_running)
         # Re-polish the button to force a style update
+        self.stop_btn.style().unpolish(self.stop_btn)
+        self.stop_btn.style().polish(self.stop_btn)
         self.record_btn.style().unpolish(self.record_btn)
         self.record_btn.style().polish(self.record_btn)
+        self.stop_all_btn.style().unpolish(self.stop_all_btn)
+        self.stop_all_btn.style().polish(self.stop_all_btn)
         self.fullscreen_btn.setEnabled(True)
 
     def start_all_streams(self):
@@ -959,10 +1628,12 @@ class RtspApp(QWidget):
                 url = self.build_url_from_state(st)
                 self.workers[i].start(url, st["transport"], st["latency"])
                 st["running"] = True
+                st["resume_on_return"] = False
+                st["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def stop_all_streams(self):
-        for i in range(4):
+        for i in range(self.max_channels):
             if self.panel_states[i]["running"]:
                 # Stop recording if active
                 if self.panel_states[i].get("recording", False):
@@ -970,6 +1641,8 @@ class RtspApp(QWidget):
                     self.panel_states[i]["recording"] = False
                 self.workers[i].stop()
                 self.panel_states[i]["running"] = False
+                self.panel_states[i]["resume_on_return"] = False
+                self.panel_states[i]["paused_for_page"] = False
         self._update_buttons_enabled()
 
     def toggle_fullscreen(self):
@@ -990,9 +1663,20 @@ class RtspApp(QWidget):
         self._sync_state_from_ui()
         path, _ = QFileDialog.getSaveFileName(self, "Save Configuration", "", "JSON Files (*.json)")
         if path:
-            data = {"version": 1, "panels": self.panel_states}
+            panels = []
+            for i in range(self.max_channels):
+                state_copy = dict(self.panel_states[i])
+                state_copy.pop("resume_on_return", None)
+                state_copy.pop("paused_for_page", None)
+                panels.append(state_copy)
+            data = {
+                "version": 2,
+                "panels": panels,
+                "settings": dict(self.app_settings),
+            }
             try:
-                with open(path, "w") as f: json.dump(data, f, indent=2)
+                with open(path, "w") as f:
+                    json.dump(data, f, indent=2)
                 self.status_lbl.setText(f"Configuration saved to {path}")
             except Exception as e:
                 QMessageBox.critical(self, "Error Saving", f"Could not save config file:\n{e}")
@@ -1003,17 +1687,35 @@ class RtspApp(QWidget):
             try:
                 with open(path, "r") as f: data = json.load(f)
                 loaded_states = data.get("panels", data)
-                if isinstance(loaded_states, list) and len(loaded_states) == 4:
+                if isinstance(loaded_states, list):
                     self.stop_all_streams()
-                    self.panel_states = loaded_states
-                    for st in self.panel_states:
-                        st['running'] = False
-                    self.active_index = 0
+                    new_states: List[Dict[str, Any]] = []
+                    for i in range(self.max_channels):
+                        base_state = self._default_panel_state(i)
+                        if i < len(loaded_states) and isinstance(loaded_states[i], dict):
+                            base_state.update(loaded_states[i])
+                        base_state["running"] = False
+                        base_state["recording"] = False
+                        base_state["resume_on_return"] = False
+                        new_states.append(base_state)
+                    self.panel_states = new_states
+
+                    settings_data = data.get("settings")
+                    if isinstance(settings_data, dict):
+                        self.app_settings.update(settings_data)
+
+                    self.panes_per_page = self._calculate_panes_per_page()
+                    self.current_page = 0
+                    page_indexes = self._page_indexes(self.current_page)
+                    self.active_index = page_indexes[0] if page_indexes else 0
+                    self._refresh_grid_layout()
+                    self._update_page_controls()
                     self._sync_ui_from_state()
-                    self._update_active_styles()
+                    self._refresh_copy_source_labels()
+                    self._enforce_background_stream_setting()
                     self.status_lbl.setText(f"Configuration loaded from {path}")
                 else:
-                    raise ValueError("Config file must contain a list/key 'panels' of 4 states.")
+                    raise ValueError("Config file must contain a list/key 'panels'.")
             except Exception as e:
                 QMessageBox.critical(self, "Error Loading", f"Could not load config file:\n{e}")
 
